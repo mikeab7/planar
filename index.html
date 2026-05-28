@@ -4056,7 +4056,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
             {task.name}
           </span>
         ); })()}
-        {task.hasChildren && task.hideableCount > 0 && (
+        {task.hasChildren && task.isExpanded && task.hideableCount > 0 && (
           <span
             onClick={e=>{ e.stopPropagation(); updateTask(task.id, {focused: !task.focused}); }}
             title={task.focused
