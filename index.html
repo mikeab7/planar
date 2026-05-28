@@ -859,17 +859,22 @@ function avatarColor(name) {
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
-function ContactPicker({ value, contacts, onCommit, onCancel, onManage }) {
+// Shared canvas for measuring typed-text width so the inline ghost prediction
+// lines up exactly with the input's text regardless of font/padding.
+const _cpCanvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
+const _cpCtx = _cpCanvas ? _cpCanvas.getContext('2d') : null;
+function _cpMeasure(text, font) { if (!_cpCtx) return 0; _cpCtx.font = font; return _cpCtx.measureText(text).width; }
+
+function ContactPicker({ value, contacts, onCommit, onCancel, variant = "master" }) {
+  const isGrid = variant === "grid";
   const [query, setQuery] = React.useState(value || '');
   const [highlight, setHighlight] = React.useState(-1);
+  const [pos, setPos] = React.useState(null);      // portal dropdown rect {left,top,width}
+  const [ghost, setGhost] = React.useState(null);  // {left, fontSize, fontFamily, fontWeight}
   const inputRef = React.useRef(null);
-  const containerRef = React.useRef(null);
+  const wrapRef = React.useRef(null);
 
-  React.useEffect(() => {
-    inputRef.current?.focus();
-    // Select all so the user can immediately replace by typing, or extend by arrow keys
-    inputRef.current?.select();
-  }, []);
+  React.useEffect(() => { inputRef.current?.focus(); inputRef.current?.select(); }, []);
 
   const q = query.trim().toLowerCase();
   const suggestions = (q
@@ -877,15 +882,39 @@ function ContactPicker({ value, contacts, onCommit, onCancel, onManage }) {
     : contacts
   ).slice(0, 6);
 
-  // Whether the typed text doesn't match an existing contact → offer to add
   const trimmed = query.trim();
   const isNewName = trimmed.length > 0 && !contacts.some(c => c.name.toLowerCase() === trimmed.toLowerCase());
   const totalItems = suggestions.length + (isNewName ? 1 : 0);
 
-  // Keep highlight in range as the filter changes
+  // Inline prediction = first contact whose name starts with what's typed (prefix match)
+  const prediction = query
+    ? contacts.find(c => c.name.toLowerCase().startsWith(query.toLowerCase()) && c.name.length > query.length)
+    : null;
+  const ghostText = prediction ? prediction.name.slice(query.length) : '';
+
+  React.useEffect(() => { setHighlight(h => h >= totalItems ? -1 : h); }, [totalItems]);
+
+  // Position portal dropdown under the input + compute the ghost text offset
+  const reposition = React.useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ left: r.left, top: r.bottom + 2, width: Math.max(220, r.width) });
+    const cs = window.getComputedStyle(el);
+    const fontFamily = cs.fontFamily, fontSize = cs.fontSize, fontWeight = cs.fontWeight || '400';
+    const padL = parseFloat(cs.paddingLeft) || 0;
+    const bordL = parseFloat(cs.borderLeftWidth) || 0;
+    const w = _cpMeasure(query, `${fontWeight} ${fontSize} ${fontFamily}`);
+    setGhost({ left: padL + bordL + w, fontSize, fontFamily, fontWeight });
+  }, [query]);
+
+  React.useLayoutEffect(() => { reposition(); }, [reposition]);
   React.useEffect(() => {
-    setHighlight(h => h >= totalItems ? -1 : h);
-  }, [totalItems]);
+    const fn = () => reposition();
+    window.addEventListener('scroll', fn, true);
+    window.addEventListener('resize', fn);
+    return () => { window.removeEventListener('scroll', fn, true); window.removeEventListener('resize', fn); };
+  }, [reposition]);
 
   function commitTyped() {
     if (!trimmed) { onCommit(''); return; }
@@ -893,102 +922,95 @@ function ContactPicker({ value, contacts, onCommit, onCancel, onManage }) {
     if (existing) onCommit(existing.name);
     else onCommit(trimmed, { name: trimmed, email: '' }); // auto-add as new contact
   }
-
-  function selectItem(i) {
-    if (i < suggestions.length) onCommit(suggestions[i].name);
-    else commitTyped(); // the "Add new" row
+  function selectItem(i) { if (i < suggestions.length) onCommit(suggestions[i].name); else commitTyped(); }
+  function acceptGhost() {
+    if (!prediction) return;
+    const full = prediction.name;
+    setQuery(full);
+    requestAnimationFrame(() => { const el = inputRef.current; if (el) el.setSelectionRange(full.length, full.length); });
   }
 
-  // Outside click → commit what's typed (don't lose the user's work)
+  // Outside click commits typed text (don't lose work). Clicks in the portal dropdown are ignored.
   React.useEffect(() => {
     function onDocMouseDown(e) {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        commitTyped();
-      }
+      if (wrapRef.current && wrapRef.current.contains(e.target)) return;
+      if (e.target.closest && e.target.closest('[data-contact-dd]')) return;
+      commitTyped();
     }
     document.addEventListener('mousedown', onDocMouseDown);
     return () => document.removeEventListener('mousedown', onDocMouseDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
 
   function onKeyDown(e) {
     if (e.key === 'Escape') { e.stopPropagation(); onCancel(); return; }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setHighlight(h => Math.min(h + 1, totalItems - 1));
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setHighlight(h => Math.max(h - 1, -1));
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHighlight(h => Math.min(h + 1, totalItems - 1)); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setHighlight(h => Math.max(h - 1, -1)); return; }
+    if (e.key === 'ArrowRight') {
+      const el = inputRef.current;
+      const atEnd = el && el.selectionStart === query.length && el.selectionEnd === query.length;
+      if (ghostText && atEnd) { e.preventDefault(); acceptGhost(); }
       return;
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.stopPropagation();
       if (e.key === 'Enter') e.preventDefault();
       if (highlight >= 0 && highlight < totalItems) selectItem(highlight);
+      else if (ghostText && prediction) onCommit(prediction.name);
       else commitTyped();
       return;
     }
   }
 
-  // Input mirrors the styling of other inline-edit inputs (name, percentComplete) — fontSize 12, inherits family
-  const inputStyle = {
-    width:'100%', height:'22px', border:'none',
-    borderBottom:'1.5px solid var(--blue)', outline:'none',
-    background:'transparent',
-    fontSize:12, fontFamily:'inherit', color:'var(--txt)', padding:'0 2px'
-  };
+  const masterInputStyle = { width:'100%', height:'22px', border:'none', borderBottom:'1.5px solid var(--blue)',
+    outline:'none', background:'transparent', color:'var(--txt)', fontSize:12, fontFamily:'inherit', padding:'0 2px' };
 
-  return (
-    <div ref={containerRef} style={{position:'relative', width:'100%'}}>
-      <input ref={inputRef} value={query}
-        onChange={e=>setQuery(e.target.value)}
-        onKeyDown={onKeyDown}
-        style={inputStyle}
-        placeholder="Type a name…" />
-      {totalItems > 0 && (
-        <div style={{position:'absolute',top:'calc(100% + 2px)',left:-6,zIndex:9999,
-          background:'#fff',border:'1px solid var(--bd2)',borderRadius:7,
-          boxShadow:'0 6px 20px rgba(0,0,0,.13)',
-          minWidth:220, maxWidth:300, overflow:'hidden'}}>
-          <div style={{maxHeight:200, overflowY:'auto'}}>
-            {suggestions.map((c, i) => (
-              <div key={c.id}
-                onMouseEnter={()=>setHighlight(i)}
-                onMouseDown={e=>{ e.preventDefault(); onCommit(c.name); }}
-                style={{display:'flex', alignItems:'center', gap:8, padding:'7px 10px',
-                  cursor:'pointer',
-                  background: highlight===i ? '#f0f2ff' : 'transparent',
-                  transition:'background .1s'}}>
-                <div style={{width:24,height:24,borderRadius:'50%',background:avatarColor(c.name),
-                  display:'flex',alignItems:'center',justifyContent:'center',
-                  fontSize:9,fontWeight:700,color:'#fff',flexShrink:0}}>{getInitials(c.name)}</div>
-                <div style={{minWidth:0}}>
-                  <div style={{fontSize:12,color:'var(--txt)',fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.name}</div>
-                  {c.email && <div style={{fontSize:10,color:'var(--mut)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.email}</div>}
-                </div>
-              </div>
-            ))}
-            {isNewName && (
-              <div
-                onMouseEnter={()=>setHighlight(suggestions.length)}
-                onMouseDown={e=>{ e.preventDefault(); commitTyped(); }}
-                style={{display:'flex', alignItems:'center', gap:7, padding:'7px 10px',
-                  cursor:'pointer',
-                  borderTop: suggestions.length ? '1px solid var(--bd)' : 'none',
-                  color:'var(--blue)', fontSize:11, fontWeight:500,
-                  background: highlight===suggestions.length ? '#f0f5ff' : 'transparent',
-                  transition:'background .1s'}}>
-                <span style={{fontSize:14,lineHeight:1}}>+</span>
-                <span style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
-                  Add "<span style={{fontWeight:600}}>{trimmed}</span>" as new contact
-                </span>
-              </div>
-            )}
+  const dropdown = (totalItems > 0 && pos) ? ReactDOM.createPortal(
+    <div data-contact-dd style={{position:'fixed', left:pos.left, top:pos.top, width:pos.width, zIndex:100000,
+      background:'#fff', border:'1px solid var(--bd2)', borderRadius:7, boxShadow:'0 6px 20px rgba(0,0,0,.13)',
+      overflow:'hidden', maxHeight:220, overflowY:'auto'}}>
+      {suggestions.map((c, i) => (
+        <div key={c.id}
+          onMouseEnter={()=>setHighlight(i)}
+          onMouseDown={e=>{ e.preventDefault(); onCommit(c.name); }}
+          style={{display:'flex', alignItems:'center', gap:8, padding:'7px 10px', cursor:'pointer',
+            background: highlight===i ? '#f0f2ff' : 'transparent'}}>
+          <div style={{width:24,height:24,borderRadius:'50%',background:avatarColor(c.name),
+            display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700,color:'#fff',flexShrink:0}}>{getInitials(c.name)}</div>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:12,color:'var(--txt)',fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.name}</div>
+            {c.email && <div style={{fontSize:10,color:'var(--mut)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.email}</div>}
           </div>
         </div>
+      ))}
+      {isNewName && (
+        <div onMouseEnter={()=>setHighlight(suggestions.length)}
+          onMouseDown={e=>{ e.preventDefault(); commitTyped(); }}
+          style={{display:'flex', alignItems:'center', gap:7, padding:'7px 10px', cursor:'pointer',
+            borderTop: suggestions.length ? '1px solid var(--bd)' : 'none',
+            color:'var(--blue)', fontSize:11, fontWeight:500,
+            background: highlight===suggestions.length ? '#f0f5ff' : 'transparent'}}>
+          <span style={{fontSize:14,lineHeight:1}}>+</span>
+          <span style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>Add "<span style={{fontWeight:600}}>{trimmed}</span>" as new contact</span>
+        </div>
       )}
+    </div>, document.body) : null;
+
+  return (
+    <div ref={wrapRef} style={{position:'relative', width:'100%'}}>
+      <input ref={inputRef} value={query}
+        className={isGrid ? "ei" : undefined}
+        style={isGrid ? undefined : masterInputStyle}
+        onChange={e=>setQuery(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder="Type a name…" />
+      {ghostText && ghost && (
+        <span aria-hidden style={{position:'absolute', left:ghost.left, top:0, height:'100%',
+          display:'flex', alignItems:'center', pointerEvents:'none', whiteSpace:'pre',
+          fontSize:ghost.fontSize, fontFamily:ghost.fontFamily, fontWeight:ghost.fontWeight,
+          color:'var(--mut)', opacity:0.5, overflow:'hidden',
+          maxWidth:`calc(100% - ${ghost.left}px - 4px)`}}>{ghostText}</span>
+      )}
+      {dropdown}
     </div>
   );
 }
@@ -3578,31 +3600,11 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                           return;
                         }
                       }
-                      // If clicking the dot circle itself, use pixel threshold to separate
-                      // a single click (open picker) from a hold-drag (start selection)
+                      // Health dot: the HealthPicker opens itself on mousedown.
+                      // Here we only sync row/column selection — no drag-select from the dot.
                       if (c.k === "health" && e.target.closest("[data-health-dot]")) {
-                        // Fix #4: always sync selection to this row immediately.
-                        // Previously only set inside the drag-threshold callback,
-                        // so a plain click opened the picker while the blue outline
-                        // stayed on whichever row was previously active.
                         setSelectedId(task.id);
                         setSelectedColIdx(ci);
-                        dragAnchor.current = {ri, ci};
-                        const sx = e.clientX, sy = e.clientY;
-                        const onMove = mv => {
-                          if (Math.abs(mv.clientX - sx) > 3 || Math.abs(mv.clientY - sy) > 3) {
-                            isDraggingCells.current = true;
-                            setSelRange({r1:ri, r2:ri, c1:ci, c2:ci});
-                            document.removeEventListener("mousemove", onMove);
-                            document.removeEventListener("mouseup", onUp);
-                          }
-                        };
-                        const onUp = () => {
-                          document.removeEventListener("mousemove", onMove);
-                          document.removeEventListener("mouseup", onUp);
-                        };
-                        document.addEventListener("mousemove", onMove);
-                        document.addEventListener("mouseup", onUp);
                         return;
                       }
                       // ID column: clicking selects the entire row
@@ -3639,7 +3641,10 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                       proj={proj} succMap={succMap} getTaskName={getTaskName}
                       setNotesCtx={setNotesCtx} projId={proj?.id} updateTask={updateTask}
                       editStartChar={edit?.taskId===task.id && edit?.col===c.k ? editStartChar : null}
+                      contacts={data?.settings?.contacts||[]}
+                      addContact={(nc)=>setData(d=>({...d, settings:{...d.settings, contacts:[...(d.settings?.contacts||[]), {id:Date.now(), ...nc}]}}))}
                       isExpandedParent={isExpandedParent} dispHealth={displayHealth} setSelectedColIdx={setSelectedColIdx} />
+
                   </div>
                 );
               })}
@@ -3718,7 +3723,9 @@ function HealthPicker({value, onChange}) {
   }, [open, value, onChange]);
 
   const handleDotClick = e => {
-    e.stopPropagation();
+    // Open on mousedown (not click) so a single press opens the menu — opening on
+    // click was unreliable because the cell's mousedown re-renders the grid first.
+    // Do NOT stopPropagation: the cell's mousedown still needs to sync row selection.
     document.dispatchEvent(new CustomEvent(PICKER_EVENT, {detail: idRef.current}));
     const r = dotRef.current.getBoundingClientRect();
     setPos({top: r.bottom + 4, left: r.left + r.width / 2 - 10});
@@ -3735,7 +3742,7 @@ function HealthPicker({value, onChange}) {
   };
   return (
     <>
-      <span ref={dotRef} onClick={handleDotClick}
+      <span ref={dotRef} onMouseDown={handleDotClick}
         data-health-dot="true"
         onMouseEnter={e=>e.currentTarget.style.outline="1.5px solid #c0c8d0"}
         onMouseLeave={e=>e.currentTarget.style.outline="1.5px solid transparent"}
@@ -3915,7 +3922,7 @@ function DepCell({items, renderLabel, renderName, s}) {
 }
 
 // ── Cell ─────────────────────────────────────────────────
-function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap, getTaskName, setNotesCtx, projId, updateTask, editStartChar, isExpandedParent, dispHealth, setSelectedColIdx}) {
+function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap, getTaskName, setNotesCtx, projId, updateTask, editStartChar, isExpandedParent, dispHealth, setSelectedColIdx, contacts, addContact}) {
   const isEdit = edit?.taskId === task.id && edit?.col === col.k;
   const s = {fontSize:12,padding:"0 8px",height:ROW_H,display:"flex",alignItems:"center",overflow:"hidden",whiteSpace:"nowrap"};
   const mono = {fontFamily:"'Inter',system-ui,sans-serif"};
@@ -3936,6 +3943,18 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
               if (e.key === "Escape") { e.nativeEvent.stopImmediatePropagation(); setEdit(null); return; }
               if (e.key === "Tab")    { e.preventDefault(); e.nativeEvent.stopImmediatePropagation(); commit(task.id, col.k, e.target.value); setSelectedColIdx(i => e.shiftKey ? Math.max(0, i-1) : Math.min(COLS.length-1, i+1)); }
             }} />
+        );
+      }
+      // Owner / responsible party: rich autocomplete with dropdown + inline prediction
+      if (col.k === "responsibleParty") {
+        return (
+          <ContactPicker
+            variant="grid"
+            value={editStartChar != null ? editStartChar : (task.responsibleParty || "")}
+            contacts={contacts || []}
+            onCommit={(name, newContact) => { if (newContact && addContact) addContact(newContact); commit(task.id, "responsibleParty", name); }}
+            onCancel={() => setEdit(null)}
+          />
         );
       }
       // For all other editable inputs, seed with the typed char if available, else existing value
