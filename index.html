@@ -3103,48 +3103,49 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
   }, [onClose]);
 
   const vw = window.innerWidth, vh = window.innerHeight;
-  const mw = 252, mh = 440;
+  // mh is an estimate of the menu's full rendered height; if y + mh would clip the
+  // bottom of the viewport, top shifts up so the menu stays fully visible. Recomputed
+  // when row padding / swatch sizing changed below — better to slightly overestimate.
+  const mw = 220, mh = 470;
   const left = x + mw > vw ? vw - mw - 8 : x;
-  const top  = y + mh > vh ? vh - mh - 8 : y;
+  const top  = y + mh > vh ? Math.max(8, vh - mh - 8) : y;
 
   const Item = ({icon, label, hint, danger, disabled, onClick, children}) => (
     <div onClick={disabled ? undefined : onClick}
-      style={{display:"flex",alignItems:"center",gap:8,padding:"5px 12px",cursor:disabled?"default":"pointer",
-        fontSize:12,color:disabled?"#c0c8d0":danger?"#dc2626":"var(--txt)",borderRadius:4,
+      style={{display:"flex",alignItems:"center",gap:7,padding:"3px 11px",cursor:disabled?"default":"pointer",
+        fontSize:11,color:disabled?"#c0c8d0":danger?"#dc2626":"var(--txt)",borderRadius:4,
         transition:"background .1s",fontFamily:"'Inter',system-ui,sans-serif",opacity:disabled?0.5:1}}
       onMouseEnter={e=>{ if(!disabled) e.currentTarget.style.background=danger?"#fff1f2":"var(--surf)"; }}
       onMouseLeave={e=>{ e.currentTarget.style.background="transparent"; }}>
-      <i className={`ti ${icon}`} style={{fontSize:13,flexShrink:0,color:disabled?"#c0c8d0":danger?"#dc2626":"var(--mut)",width:16,textAlign:"center"}} aria-hidden="true" />
+      <i className={`ti ${icon}`} style={{fontSize:12,flexShrink:0,color:disabled?"#c0c8d0":danger?"#dc2626":"var(--mut)",width:14,textAlign:"center"}} aria-hidden="true" />
       <span style={{flex:1}}>{label}{children}</span>
-      {hint && <span style={{color:"#b0b7c0",fontSize:10,fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".03em"}}>{hint}</span>}
+      {hint && <span style={{color:"#b0b7c0",fontSize:9,fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".03em"}}>{hint}</span>}
     </div>
   );
-  const Sep = () => <div style={{height:1,background:"var(--bd)",margin:"3px 0"}} />;
+  const Sep = () => <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />;
   const hasAnyFmt = !!task.rowColor || !!task.bold || !!task.italic;
   const Header = () => (
-    <div style={{padding:"6px 12px 5px",borderBottom:"1px solid var(--bd)",marginBottom:3}}>
-      <div style={{fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",marginBottom:1}}>Task {task.id}</div>
-      <div style={{fontSize:12,fontWeight:task.bold?700:500,fontStyle:task.italic?"italic":"normal",color:"var(--txt)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:220}}>{task.name || <span style={{color:"var(--mut)",fontStyle:"italic"}}>New task</span>}</div>
+    <div style={{padding:"5px 11px 4px",borderBottom:"1px solid var(--bd)",marginBottom:2}}>
+      <div style={{fontSize:9,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",marginBottom:1}}>Task {task.id}</div>
+      <div style={{fontSize:11,fontWeight:task.bold?700:500,fontStyle:task.italic?"italic":"normal",color:"var(--txt)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:200}}>{task.name || <span style={{color:"var(--mut)",fontStyle:"italic"}}>New task</span>}</div>
     </div>
   );
 
-  // Word/Excel-style format toggle button: filled-indigo when on, neutral when off.
-  // Pressed-state styling mirrors common ribbon-button conventions so the active
-  // state reads at a glance.
-  const ToggleBtn = ({active, onClick, title, children, italic=false}) => (
-    <button title={title} onClick={onClick}
-      style={{width:26,height:24,borderRadius:3,padding:0,cursor:"pointer",
+  // Excel-ribbon-style square button: 24x22 with light border, light hover tint, and a
+  // pressed/active state that mirrors common ribbon conventions. Used for B / I / fill
+  // bucket / clear at the top of the menu.
+  const ExcelBtn = ({active, disabled, onClick, title, children}) => (
+    <button title={title} onClick={disabled ? undefined : onClick} disabled={disabled}
+      style={{width:24,height:22,borderRadius:3,padding:0,cursor:disabled?"default":"pointer",
         display:"inline-flex",alignItems:"center",justifyContent:"center",
-        fontFamily:"'Inter',system-ui,sans-serif",fontSize:12,
-        fontWeight: active ? 700 : 600,
-        fontStyle: italic ? "italic" : "normal",
-        color: active ? "#fff" : "var(--txt)",
-        background: active ? "#4f46e5" : "#fff",
-        border: `1px solid ${active ? "#4338ca" : "#d1d5db"}`,
+        color: disabled ? "#c0c8d0" : active ? "#fff" : "var(--txt)",
+        background: active ? "#4f46e5" : "transparent",
+        border: `1px solid ${active ? "#4338ca" : "transparent"}`,
         boxShadow: active ? "inset 0 1px 2px rgba(0,0,0,0.15)" : "none",
+        opacity: disabled ? 0.5 : 1,
         transition:"background .12s,color .12s,border-color .12s"}}
-      onMouseEnter={e=>{ if(!active){ e.currentTarget.style.background="var(--surf)"; e.currentTarget.style.borderColor="#9ca3af"; } }}
-      onMouseLeave={e=>{ if(!active){ e.currentTarget.style.background="#fff"; e.currentTarget.style.borderColor="#d1d5db"; } }}>
+      onMouseEnter={e=>{ if(!disabled && !active){ e.currentTarget.style.background="#e5e7eb"; e.currentTarget.style.borderColor="#d1d5db"; } }}
+      onMouseLeave={e=>{ if(!disabled && !active){ e.currentTarget.style.background="transparent"; e.currentTarget.style.borderColor="transparent"; } }}>
       {children}
     </button>
   );
@@ -3153,8 +3154,62 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
 
   return ReactDOM.createPortal(
     <div ref={menuRef} style={{position:"fixed",top,left,background:"#fff",border:"1px solid var(--bd2)",
-      borderRadius:6,padding:"4px 0",zIndex:9999,boxShadow:"0 4px 20px rgba(0,0,0,0.14)",minWidth:mw}}>
+      borderRadius:6,padding:"3px 0",zIndex:9999,boxShadow:"0 4px 20px rgba(0,0,0,0.14)",minWidth:mw}}>
       <Header />
+      {/* ─── Excel-style format mini-toolbar at TOP for quick access ────────────────
+          Mirrors the look of Excel/Word's selection ribbon: a tight horizontal strip
+          of square buttons with a subtle background tint, separated by a vertical
+          divider rule. The fill-bucket button shows the current row color as a colored
+          strip beneath it (when set) — Excel's "last used color" affordance. The
+          swatch grid appears immediately below, keeping all formatting in one block. */}
+      <div style={{padding:"3px 6px",background:"#f7f8fa",borderBottom:"1px solid var(--bd)",display:"flex",alignItems:"center",gap:1}}>
+        <ExcelBtn active={!!task.bold}   onClick={()=>onSetBold(!task.bold)}     title="Bold">
+          <span style={{fontWeight:800,fontSize:13,fontFamily:"'Inter',system-ui,sans-serif",lineHeight:1}}>B</span>
+        </ExcelBtn>
+        <ExcelBtn active={!!task.italic} onClick={()=>onSetItalic(!task.italic)} title="Italic">
+          <span style={{fontStyle:"italic",fontWeight:600,fontSize:13,fontFamily:"Georgia,'Times New Roman',serif",lineHeight:1}}>I</span>
+        </ExcelBtn>
+        <span style={{width:1,height:16,background:"var(--bd2)",margin:"0 3px"}} />
+        {/* Fill-bucket button: icon over a colored strip showing current row color (Excel pattern) */}
+        <ExcelBtn active={!!task.rowColor} onClick={()=>{ /* visual only — swatch grid below is live */ }} title={task.rowColor ? `Fill: ${task.rowColor}` : "Fill color"}>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1}}>
+            <svg width="13" height="11" viewBox="0 0 24 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 11l8 8a2 2 0 0 0 2.8 0L22 10.5 12.5 1 4 9.5a2 2 0 0 0 0 2.8z" />
+              <path d="M5 9h13" />
+            </svg>
+            <div style={{width:14,height:3,background:task.rowColor||"transparent",border:task.rowColor?"none":"1px dashed #c0c8d0",borderRadius:1}} />
+          </div>
+        </ExcelBtn>
+        <span style={{width:1,height:16,background:"var(--bd2)",margin:"0 3px"}} />
+        {/* Clear / eraser — Excel-style "Clear Formatting" affordance */}
+        <ExcelBtn onClick={onClearFormat} disabled={!hasAnyFmt} title="Clear formatting">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19 20H7l-4-4 8-8 12 12-4 4" />
+            <path d="M9 11l4 4" />
+            <path d="M22 21H7" />
+          </svg>
+        </ExcelBtn>
+        <span style={{flex:1}} />
+        <span style={{fontSize:9,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",paddingRight:2}}>Format</span>
+      </div>
+      {/* Swatch grid — immediately below the toolbar, no separator (visually one block) */}
+      <div style={{padding:"4px 6px 5px",background:"#f7f8fa",borderBottom:"1px solid var(--bd)",display:"grid",gridTemplateColumns:"repeat(10, 18px)",gap:2,justifyContent:"start"}}>
+        {/* "No fill" tile in slot 1 — matches Excel/Word's color picker layout */}
+        <button title="No fill (clear color)" onClick={()=>onSetRowColor(null)}
+          style={{width:18,height:18,borderRadius:2,background:"#fff",cursor:"pointer",padding:0,display:"flex",alignItems:"center",justifyContent:"center",
+            border:task.rowColor==null?"1.5px solid #4f46e5":"1px solid #d1d5db"}}>
+          <svg width="9" height="9" viewBox="0 0 10 10">
+            <line x1="1" y1="1" x2="9" y2="9" stroke={task.rowColor==null?"#4f46e5":"#9ca3af"} strokeWidth="1.5"/>
+            <line x1="9" y1="1" x2="1" y2="9" stroke={task.rowColor==null?"#4f46e5":"#9ca3af"} strokeWidth="1.5"/>
+          </svg>
+        </button>
+        {ROW_COLORS.slice(0, 19).map(rc => (
+          <button key={rc.color} title={rc.label} onClick={()=>onSetRowColor(rc.color)}
+            style={{width:18,height:18,borderRadius:2,background:rc.color,cursor:"pointer",padding:0,
+              border:task.rowColor===rc.color?"1.5px solid #111827":"1px solid #d1d5db",
+              boxShadow:task.rowColor===rc.color?"inset 0 0 0 1px #fff":"none"}} />
+        ))}
+      </div>
       <Item icon="ti-row-insert-top"    label="Insert Row Above"  hint="Ins"  onClick={onInsertAbove} />
       <Item icon="ti-row-insert-bottom" label="Insert Row Below"              onClick={onInsertBelow} />
       <Item icon="ti-sitemap"           label="Add Subtask"                   onClick={onAddSubtask} />
@@ -3171,43 +3226,6 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
       <Item icon="ti-indent-decrease"   label="Outdent ←"         hint="Alt⇧←" onClick={onOutdent} disabled={!canOutdent} />
       <Sep />
       <Item icon="ti-message-circle"    label="Add Note"                      onClick={onAddNote} />
-      <Sep />
-      {/* Format toolbar: Word/Excel-style B / I toggles + 5x4 fill swatch grid.
-          Same fill color drives both the row background and the Gantt bar fill. */}
-      <div style={{padding:"4px 12px 2px",display:"flex",alignItems:"center",gap:6}}>
-        <div style={{fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",flex:1}}>Format</div>
-        {hasAnyFmt && (
-          <button onClick={onClearFormat} title="Clear all formatting on this task"
-            style={{fontSize:10,color:"#6b7280",background:"transparent",border:"none",cursor:"pointer",padding:"2px 4px",borderRadius:3,fontFamily:"'Inter',system-ui,sans-serif"}}
-            onMouseEnter={e=>{e.currentTarget.style.background="var(--surf)";e.currentTarget.style.color="#dc2626";}}
-            onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color="#6b7280";}}>
-            Clear
-          </button>
-        )}
-      </div>
-      <div style={{padding:"2px 12px 6px",display:"flex",alignItems:"center",gap:5}}>
-        <ToggleBtn active={!!task.bold}   onClick={()=>onSetBold(!task.bold)}     title="Bold (toggle)">B</ToggleBtn>
-        <ToggleBtn active={!!task.italic} onClick={()=>onSetItalic(!task.italic)} title="Italic (toggle)" italic>I</ToggleBtn>
-        <span style={{flex:1,fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".04em",paddingLeft:4}}>{task.bold && task.italic ? "Bold + Italic" : task.bold ? "Bold" : task.italic ? "Italic" : ""}</span>
-      </div>
-      <div style={{padding:"0 12px 6px",display:"grid",gridTemplateColumns:"repeat(5, 1fr)",gap:3}}>
-        {/* "No fill" tile occupies the first cell — matches Excel/Word's color picker layout */}
-        <button title="No fill (clear color)" onClick={()=>onSetRowColor(null)}
-          style={{aspectRatio:"1/1",borderRadius:3,background:"#fff",cursor:"pointer",padding:0,display:"flex",alignItems:"center",justifyContent:"center",
-            border:task.rowColor==null?"2px solid #4f46e5":"1px solid #d1d5db",
-            boxShadow:task.rowColor==null?"inset 0 0 0 1px #fff":"none"}}>
-          <svg width="10" height="10" viewBox="0 0 10 10">
-            <line x1="1" y1="1" x2="9" y2="9" stroke={task.rowColor==null?"#4f46e5":"#9ca3af"} strokeWidth="1.5"/>
-            <line x1="9" y1="1" x2="1" y2="9" stroke={task.rowColor==null?"#4f46e5":"#9ca3af"} strokeWidth="1.5"/>
-          </svg>
-        </button>
-        {ROW_COLORS.slice(0, 19).map(rc => (
-          <button key={rc.color} title={rc.label} onClick={()=>onSetRowColor(rc.color)}
-            style={{aspectRatio:"1/1",borderRadius:3,background:rc.color,cursor:"pointer",padding:0,
-              border:task.rowColor===rc.color?"2px solid #374151":"1px solid #d1d5db",
-              boxShadow:task.rowColor===rc.color?"inset 0 0 0 1px #fff":"none"}} />
-        ))}
-      </div>
       <Sep />
       <Item icon="ti-trash"             label="Delete Row"        danger       onClick={onDelete} />
     </div>,
@@ -3898,7 +3916,11 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                     }}
                     onDoubleClick={() => {
                       const isParentDateLocked = task.hasChildren && (c.k==="start"||c.k==="end"||c.k==="duration");
-                      if (c.e && c.t !== "notes" && !isParentDateLocked) setEdit({taskId: task.id, col: c.k});
+                      // Picker columns (health/status) have their own popover — text-edit on them
+                      // would render the raw value (e.g. "yellow") in an input, which is meaningless
+                      // to the user. Notes also handled separately via the notes modal.
+                      const isPicker = c.k === "health" || c.k === "status";
+                      if (c.e && c.t !== "notes" && !isPicker && !isParentDateLocked) setEdit({taskId: task.id, col: c.k});
                     }}>
                     <Cell task={task} col={{...c, w:colWidths[c.k]}} edit={edit} setEdit={setEdit} commit={commit} commitAndAdvance={commitAndAdvance}
                       proj={proj} succMap={succMap} getTaskName={getTaskName}
@@ -3956,8 +3978,10 @@ function HealthPicker({value, onChange}) {
 
   useEffect(() => {
     if (!open) return;
-    // Initialise highlight to current value
-    setHiIdx(HK.indexOf(value) >= 0 ? HK.indexOf(value) : 0);
+    // Don't pre-highlight the current value — standard dropdown behavior shows all options
+    // equally on open; user navigates via hover/arrow keys. The trigger itself still shows
+    // the current value with its halo so they know what's currently set.
+    setHiIdx(-1);
 
     const handleDown = e => {
       if (!dotRef.current?.contains(e.target) && !menuRef.current?.contains(e.target))
@@ -3999,11 +4023,11 @@ function HealthPicker({value, onChange}) {
 
   const h = HEALTH[value] || HEALTH.gray;
   const dot = h.dot;
-  const DotSpan = ({hk, size=13, active=false}) => {
+  const DotSpan = ({hk, size=13, active=false, noPointer=false}) => {
     const hh = HEALTH[hk] || HEALTH.gray;
     return <span style={{width:size,height:size,borderRadius:"50%",background:hh.dot,border:hh.border,
       display:"block",flexShrink:0,boxShadow:active?`0 0 0 2px ${hh.dot === "#ffffff" ? "#d1d5db" : hh.dot}44`:"none",
-      transition:"box-shadow .15s"}} />;
+      transition:"box-shadow .15s",pointerEvents:noPointer?"none":"auto"}} />;
   };
   return (
     <>
@@ -4016,11 +4040,14 @@ function HealthPicker({value, onChange}) {
           width:"100%",height:"100%",cursor:"pointer",
           background:open?"rgba(9,105,218,0.07)":"transparent",
           transition:"background .12s"}}>
+        {/* Inner pill + dot are pointer-events:none so a click on the dot itself bubbles
+            cleanly to the outer trigger's onClick instead of getting absorbed by inner
+            spans — fixes the "click on the colored circle does nothing" hit-target issue. */}
         <span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",
-          width:24,height:18,borderRadius:4,
+          width:24,height:18,borderRadius:4,pointerEvents:"none",
           outline:open?`1.5px solid ${dot === "#ffffff" ? "#d1d5db" : dot}`:"1.5px solid transparent",
           outlineOffset:0,transition:"outline-color .1s"}}>
-          <DotSpan hk={value} active={open} />
+          <DotSpan hk={value} active={open} noPointer />
         </span>
       </span>
       {open && ReactDOM.createPortal(
@@ -4032,13 +4059,17 @@ function HealthPicker({value, onChange}) {
           {HK.map((hk, i) => (
             <span key={hk} title={HEALTH[hk].label}
               onMouseEnter={()=>setHiIdx(i)}
-              onMouseDown={e => { e.stopPropagation(); onChange(hk); setOpen(false); }}
+              onMouseLeave={()=>setHiIdx(-1)}
+              onClick={e => { e.stopPropagation(); onChange(hk); setOpen(false); }}
               style={{display:"flex",alignItems:"center",justifyContent:"center",
                 width:28,height:20,borderRadius:4,cursor:"pointer",
                 outline: i===hiIdx ? `1.5px solid ${HEALTH[hk].dot === "#ffffff" ? "#d1d5db" : HEALTH[hk].dot}` : "1.5px solid transparent",
                 outlineOffset:0,transition:"outline-color .1s",
                 background: i===hiIdx ? "var(--surf)" : "transparent"}}>
-              <DotSpan hk={hk} active={hk===value} />
+              {/* active driven by hiIdx only — no auto-halo on the current value so the menu
+                  doesn't "drop down to the current color." pointer-events:none on the dot so
+                  direct clicks land on this <span>'s onClick rather than getting absorbed. */}
+              <DotSpan hk={hk} active={i===hiIdx} noPointer />
             </span>
           ))}
         </div>,
@@ -4065,7 +4096,7 @@ function StatusPicker({value, onChange}) {
 
   useEffect(() => {
     if (!open) return;
-    setHiIdx(HK.indexOf(value) >= 0 ? HK.indexOf(value) : 0);
+    setHiIdx(-1); // standard dropdown: no current-value preselection
     const handleDown = e => {
       if (!ref.current?.contains(e.target) && !menuRef.current?.contains(e.target))
         setOpen(false);
@@ -4127,7 +4158,8 @@ function StatusPicker({value, onChange}) {
             display:"flex",flexDirection:"column",gap:3,
             zIndex:9999,boxShadow:"0 4px 14px rgba(0,0,0,0.15)"}}>
           {HK.map((hk, i) => (
-            <span key={hk} onMouseEnter={()=>setHiIdx(i)} onMouseDown={e=>{e.stopPropagation();onChange(hk);setOpen(false);}}
+            <span key={hk} onMouseEnter={()=>setHiIdx(i)} onMouseLeave={()=>setHiIdx(-1)}
+              onClick={e=>{e.stopPropagation();onChange(hk);setOpen(false);}}
               style={{cursor:"pointer",padding:"1px 0",borderRadius:3,display:"block",
                 background: i===hiIdx ? "var(--surf)" : "transparent"}}>
               <Pill hk={hk} showDot={true} />
@@ -4194,7 +4226,10 @@ function DepCell({items, renderLabel, renderName, s}) {
 
 // ── Cell ─────────────────────────────────────────────────
 function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap, getTaskName, setNotesCtx, projId, updateTask, editStartChar, isExpandedParent, dispHealth, setSelectedColIdx, contacts, addContact}) {
-  const isEdit = edit?.taskId === task.id && edit?.col === col.k;
+  // Picker columns (health/status) are NEVER text-editable — their popover IS the editor.
+  // If something accidentally sets edit to a picker column, ignore it (don't render as input).
+  const isPickerCol = col.k === "health" || col.k === "status";
+  const isEdit = !isPickerCol && edit?.taskId === task.id && edit?.col === col.k;
   const s = {fontSize:12,padding:"0 8px",height:ROW_H,display:"flex",alignItems:"center",overflow:"hidden",whiteSpace:"nowrap"};
   const mono = {fontFamily:"'Inter',system-ui,sans-serif"};
 
