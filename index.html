@@ -2238,21 +2238,59 @@ function App() {
   const flatTasks = useMemo(() => {
     if (!proj) return [];
     const childSet = new Set(proj.tasks.filter(t => t.parentId !== null).map(t => t.parentId));
-    const byId = Object.fromEntries(proj.tasks.map(t => [t.id, t]));
-    // A child is "hideable" by Focus mode if it's a LEAF that is either completed
-    // (green) or not-yet-started (gray). Active work (yellow/red/paused) always stays.
-    const isHideable = c => !childSet.has(c.id) && (c.health === "green" || c.health === "gray");
+    const byId = {};
+    const kidsBy = new Map();
+    proj.tasks.forEach(t => {
+      byId[t.id] = t;
+      if (!kidsBy.has(t.parentId)) kidsBy.set(t.parentId, []);
+      kidsBy.get(t.parentId).push(t);
+    });
+    const kidsOf = id => kidsBy.get(id) || [];
+
+    // Rolled status of a task's whole subtree: "done" (every descendant complete),
+    // "upcoming" (every descendant not-started), "paused" (every descendant paused),
+    // or "active" (anything in progress / needs-attention / mixed).
+    const statusMemo = {};
+    const rolledStatus = id => {
+      if (statusMemo[id] !== undefined) return statusMemo[id];
+      const kids = kidsOf(id);
+      let res;
+      if (kids.length === 0) {
+        const h = byId[id].health;
+        res = h === "green" ? "done" : h === "gray" ? "upcoming" : h === "paused" ? "paused" : "active";
+      } else {
+        const ss = kids.map(k => rolledStatus(k.id));
+        res = ss.every(s => s === "done") ? "done"
+            : ss.every(s => s === "upcoming") ? "upcoming"
+            : ss.every(s => s === "paused") ? "paused"
+            : "active";
+      }
+      statusMemo[id] = res;
+      return res;
+    };
+    // A child (leaf OR sub-group) is hideable by Focus when its whole subtree is
+    // done, not-started, or paused. Anything with in-progress/needs-attention work stays.
+    const hideStatusOf = id => { const s = rolledStatus(id); return s === "active" ? null : s; };
+
     const out = [];
     const walk = (parentId, level) => {
       const parent = parentId === null ? null : byId[parentId];
-      let children = proj.tasks.filter(t => t.parentId === parentId);
-      if (parent && parent.focused) children = children.filter(c => !isHideable(c));
+      let children = kidsOf(parentId);
+      if (parent && parent.focused) children = children.filter(c => !hideStatusOf(c.id));
       children.forEach(t => {
         const hasChildren = childSet.has(t.id);
-        const hideableCount = hasChildren
-          ? proj.tasks.filter(c => c.parentId === t.id && isHideable(c)).length
-          : 0;
-        out.push({...t, level, hasChildren, hideableCount});
+        // Separate counts of what Focus would hide: completed, paused, not-started
+        let hideableDone = 0, hideableUpcoming = 0, hideablePaused = 0;
+        if (hasChildren) {
+          kidsOf(t.id).forEach(c => {
+            const hs = hideStatusOf(c.id);
+            if (hs === "done") hideableDone++;
+            else if (hs === "upcoming") hideableUpcoming++;
+            else if (hs === "paused") hideablePaused++;
+          });
+        }
+        out.push({...t, level, hasChildren, hideableDone, hideableUpcoming, hideablePaused,
+          hideableCount: hideableDone + hideableUpcoming + hideablePaused});
         if (t.isExpanded) walk(t.id, level + 1);
       });
     };
@@ -4060,24 +4098,42 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
           <span
             onClick={e=>{ e.stopPropagation(); updateTask(task.id, {focused: !task.focused}); }}
             title={task.focused
-              ? "Show all tasks in this group"
-              : `Focus: hide ${task.hideableCount} completed / not-started task${task.hideableCount>1?'s':''}`}
+              ? `Show all tasks in this group — ${task.hideableDone} completed, ${task.hideablePaused} paused, ${task.hideableUpcoming} not started hidden`
+              : `Focus: hide ${task.hideableCount} completed / paused / not-started task${task.hideableCount>1?'s':''}`}
             style={{
-              marginLeft:7, flexShrink:0, cursor:"pointer", userSelect:"none",
-              display:"inline-flex", alignItems:"center", gap:3,
-              fontSize:9.5, fontWeight:600, lineHeight:1, whiteSpace:"nowrap",
-              padding:"2px 6px", borderRadius:10,
-              background: task.focused ? "#eef2ff" : "var(--surf)",
-              color: task.focused ? "var(--amber)" : "var(--mut)",
-              border: `1px solid ${task.focused ? "#c7d2fe" : "var(--bd2)"}`,
-              transition:"background .12s,color .12s,border-color .12s",
+              marginLeft:"auto", flexShrink:0, cursor:"pointer", userSelect:"none",
+              display:"inline-flex", alignItems:"center", gap:5,
+              fontSize:10, fontWeight:600, lineHeight:1, whiteSpace:"nowrap",
+              color:"var(--mut)",
+              padding:"2px 7px", borderRadius:10,
+              background: task.focused ? "var(--surf)" : "transparent",
+              border: `1px solid ${task.focused ? "var(--bd2)" : "transparent"}`,
+              transition:"background .12s,border-color .12s",
             }}
-            onMouseEnter={e=>{ if(!task.focused){ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.style.color="var(--amber)"; } }}
-            onMouseLeave={e=>{ if(!task.focused){ e.currentTarget.style.borderColor="var(--bd2)"; e.currentTarget.style.color="var(--mut)"; } }}>
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            onMouseEnter={e=>{ e.currentTarget.style.background="var(--surf)"; e.currentTarget.style.borderColor="var(--bd2)"; }}
+            onMouseLeave={e=>{ if(!task.focused){ e.currentTarget.style.background="transparent"; e.currentTarget.style.borderColor="transparent"; } }}>
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{opacity:.65,flexShrink:0}}>
               <path d="M3 5h18M6 12h12M10 19h4"/>
             </svg>
-            {task.focused ? `${task.hideableCount} hidden` : task.hideableCount}
+            {/* Status breakdown only when focused (children hidden); when expanded you can already see statuses */}
+            {task.focused && task.hideableDone > 0 && (
+              <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:"#16a34a",flexShrink:0}} />
+                {task.hideableDone}
+              </span>
+            )}
+            {task.focused && task.hideablePaused > 0 && (
+              <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:"#9ca3af",flexShrink:0}} />
+                {task.hideablePaused}
+              </span>
+            )}
+            {task.focused && task.hideableUpcoming > 0 && (
+              <span style={{display:"inline-flex",alignItems:"center",gap:3}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:"#ffffff",border:"1.5px solid #d1d5db",flexShrink:0}} />
+                {task.hideableUpcoming}
+              </span>
+            )}
           </span>
         )}
       </span>
