@@ -84,17 +84,30 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // ── Constants ─────────────────────────────────────────────
 const ROW_H = 24, PPD = 22, TL_H = 30, BUF = 6;
+// Excel-style fill palette: 5 columns x 4 rows = 20 swatches. Top rows = pastel tints
+// (read well on light grid rows + leave room for text); bottom rows = stronger fills
+// (work well as Gantt-bar accents). Used by the right-click Format toolbar.
 const ROW_COLORS = [
-  { color: '#fef9c3', label: 'Yellow'  },
-  { color: '#ffedd5', label: 'Orange'  },
-  { color: '#fee2e2', label: 'Red'     },
-  { color: '#fce7f3', label: 'Pink'    },
-  { color: '#ede9fe', label: 'Purple'  },
-  { color: '#dbeafe', label: 'Blue'    },
-  { color: '#ccfbf1', label: 'Teal'    },
-  { color: '#dcfce7', label: 'Green'   },
-  { color: '#e0e7ff', label: 'Indigo'  },
-  { color: '#f1f5f9', label: 'Gray'    },
+  { color: '#fef3c7', label: 'Yellow tint'  },
+  { color: '#ffedd5', label: 'Orange tint'  },
+  { color: '#fee2e2', label: 'Red tint'     },
+  { color: '#fce7f3', label: 'Pink tint'    },
+  { color: '#f3e8ff', label: 'Purple tint'  },
+  { color: '#fde68a', label: 'Yellow'       },
+  { color: '#fed7aa', label: 'Orange'       },
+  { color: '#fecaca', label: 'Red'          },
+  { color: '#fbcfe8', label: 'Pink'         },
+  { color: '#e9d5ff', label: 'Purple'       },
+  { color: '#d9f99d', label: 'Lime'         },
+  { color: '#bbf7d0', label: 'Green'        },
+  { color: '#a5f3fc', label: 'Cyan'         },
+  { color: '#bfdbfe', label: 'Blue'         },
+  { color: '#c7d2fe', label: 'Indigo'       },
+  { color: '#ecfccb', label: 'Lime tint'    },
+  { color: '#d1fae5', label: 'Green tint'   },
+  { color: '#cffafe', label: 'Cyan tint'    },
+  { color: '#dbeafe', label: 'Blue tint'    },
+  { color: '#e0e7ff', label: 'Indigo tint'  },
 ];
 const BASE_HEALTH = {
   gray:   { label: "Not Started",  dot: "#ffffff", border: "1.5px solid #d1d5db", bar: "#f8fafc",  ganttBar: "#94a3b8", ganttStyle: "solid"   },
@@ -1408,6 +1421,11 @@ function App() {
   const [pdfExportOpen, setPdfExportOpen] = useState(false);
   const [projCtx,    setProjCtx]    = useState(null);
   const [taskCtx,    setTaskCtx]    = useState(null);
+  // Task-level clipboard for Ctrl+C / Ctrl+X / Ctrl+V. Held in a ref because the
+  // global keydown handler runs in a stable effect and would otherwise capture a
+  // stale value. Shape: { mode: "copy"|"cut", tasks: [deep-copied subtree], sourceProjId, sourceRootId }
+  const clipboardRef = useRef(null);
+  const [, setClipboardTick] = useState(0); // bump to force re-render when clipboard changes (for menu/visual cues)
   const [renameModal, setRenameModal] = useState(null);
   const [edit,       setEdit]       = useState(null);
   const [editStartChar, setEditStartChar] = useState(null);
@@ -1652,6 +1670,28 @@ function App() {
           }
           return;
         }
+        // Ctrl/Cmd+C — copy selected task (and its whole subtree) to the task clipboard.
+        // Only fires when the row is selected at task level (no cell-text selection); the
+        // typing-guard above already prevents this from stealing copy from input fields.
+        if (k === "c" && !e.shiftKey && selectedId !== null) {
+          e.preventDefault();
+          copyTaskById(selectedId);
+          return;
+        }
+        // Ctrl/Cmd+X — cut: same as copy, but the next paste removes the source.
+        if (k === "x" && !e.shiftKey && selectedId !== null) {
+          e.preventDefault();
+          cutTaskById(selectedId);
+          return;
+        }
+        // Ctrl/Cmd+V — paste the clipboard's subtree below the currently-selected task,
+        // as a sibling at the target's level. Internal predecessors are remapped; external
+        // ones stay valid in the same project.
+        if (k === "v" && !e.shiftKey && selectedId !== null) {
+          e.preventDefault();
+          pasteTaskAfter(selectedId);
+          return;
+        }
       }
       // Alt+Shift+Right → indent (make subtask of row above)
       if (e.altKey && e.shiftKey && e.key === "ArrowRight" && !typing) {
@@ -1844,6 +1884,9 @@ function App() {
         const u = {...t, ...updates};
         // Sanitize rowColor — only allow known hex colors or null
         if ('rowColor' in updates) u.rowColor = isValidColor(updates.rowColor) ? updates.rowColor : null;
+        // Sanitize per-task text-format overrides to strict booleans (so junk data can't render)
+        if ('bold' in updates)   u.bold   = !!updates.bold;
+        if ('italic' in updates) u.italic = !!updates.italic;
         if ('predecessors' in updates) {
           u.predecessors = normPreds(updates.predecessors);
           // Editing a predecessor is an explicit instruction to let the cascade
@@ -2148,6 +2191,92 @@ function App() {
       newTasks.splice(srcIdx + 1, 0, copy);
       return {...d, nTid: {...d.nTid, [pid]: nid+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(newTasks)}}};
     });
+  }, []);
+
+  // ─── Task clipboard (Ctrl+C / Ctrl+X / Ctrl+V) ──────────────────────────────
+  // Collects the task + every descendant as a deep-copied subtree so children come
+  // along with their parent. Copies preserve formatting (rowColor/bold/italic),
+  // predecessors, dates, notes — everything. Stored in clipboardRef so the global
+  // keydown handler reads fresh state without re-binding on every change.
+  const collectSubtreeFor = (rootId, allTasks) => {
+    const out = [];
+    const walk = id => {
+      const t = allTasks.find(x => x.id === id);
+      if (!t) return;
+      out.push({...t, notes: (t.notes||[]).map(n => ({...n})), predecessors: (t.predecessors||[]).map(p => ({...p}))});
+      allTasks.filter(x => x.parentId === id).forEach(c => walk(c.id));
+    };
+    walk(rootId);
+    return out;
+  };
+  const copyTaskById = useCallback((taskId) => {
+    const pid = dataRef.current?.aPid;
+    const tasks = dataRef.current?.projects?.[pid]?.tasks;
+    if (!tasks) return;
+    const subtree = collectSubtreeFor(taskId, tasks);
+    if (subtree.length === 0) return;
+    clipboardRef.current = { mode: "copy", tasks: subtree, sourceProjId: pid, sourceRootId: taskId };
+    setClipboardTick(t => t + 1);
+  }, []);
+  const cutTaskById = useCallback((taskId) => {
+    const pid = dataRef.current?.aPid;
+    const tasks = dataRef.current?.projects?.[pid]?.tasks;
+    if (!tasks) return;
+    const subtree = collectSubtreeFor(taskId, tasks);
+    if (subtree.length === 0) return;
+    clipboardRef.current = { mode: "cut", tasks: subtree, sourceProjId: pid, sourceRootId: taskId };
+    setClipboardTick(t => t + 1);
+  }, []);
+  const pasteTaskAfter = useCallback((targetId) => {
+    const cb = clipboardRef.current;
+    if (!cb || targetId == null) return;
+    setData(d => {
+      const pid = d.aPid;
+      const tasks = d.projects[pid].tasks;
+      const target = tasks.find(t => t.id === targetId);
+      if (!target) return d;
+
+      // Remap old subtree IDs to a temporary high range so they can't collide with
+      // existing IDs; sortByVisualOrder + renumberTasks below normalizes back to 1..N.
+      const baseTempId = Math.max(0, ...tasks.map(t => t.id)) + 1000;
+      const idMap = {};
+      cb.tasks.forEach((t, i) => { idMap[t.id] = baseTempId + i; });
+
+      const rootOldId = cb.sourceRootId;
+      const pasted = cb.tasks.map(t => ({
+        ...t,
+        id: idMap[t.id],
+        // The subtree's root becomes a sibling of the target (same parent); inner
+        // tasks keep their parent inside the subtree (remapped to the new IDs).
+        parentId: t.id === rootOldId ? target.parentId : (idMap[t.parentId] ?? null),
+        // Predecessor rewiring: internal (within the pasted subtree) → new ID; external
+        // (points outside the subtree) → keep original ID, which still resolves in the
+        // same project. renumberTasks below will drop any external ID that no longer
+        // exists (e.g. cross-project paste, but we only support same-project here).
+        predecessors: (t.predecessors||[]).map(p => ({...p, id: idMap[p.id] ?? p.id})),
+      }));
+
+      // Insert right after the target row in raw array order; sortByVisualOrder will
+      // produce the correct visual ordering (target's whole subtree first, then pasted).
+      const result = [...tasks];
+      const targetIdx = result.findIndex(t => t.id === target.id);
+      result.splice(targetIdx + 1, 0, ...pasted);
+
+      // Cut: delete the source subtree from this project (move semantics). On copy mode,
+      // the source stays. Cross-project cut is also handled (only delete if same project).
+      let final = result;
+      if (cb.mode === "cut" && cb.sourceProjId === pid) {
+        const sourceIds = new Set(cb.tasks.map(t => t.id));
+        final = result.filter(t => !sourceIds.has(t.id));
+      }
+
+      return {
+        ...d,
+        projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(final))}}
+      };
+    });
+    // Cut is one-shot (move semantics); copy stays in the clipboard for repeated pastes.
+    if (cb.mode === "cut") { clipboardRef.current = null; setClipboardTick(t => t + 1); }
   }, []);
 
   const indentTaskById = useCallback((taskId) => {
@@ -2715,13 +2844,20 @@ function App() {
           onInsertBelow={() => { insertTaskBelow(taskCtx.task.id); setTaskCtx(null); }}
           onAddSubtask={() => { addSubtask(taskCtx.task.id); setTaskCtx(null); }}
           onDuplicate={() => { duplicateTask(taskCtx.task.id); setTaskCtx(null); }}
+          onCutTask={() => { cutTaskById(taskCtx.task.id); setTaskCtx(null); }}
+          onCopyTaskFull={() => { copyTaskById(taskCtx.task.id); setTaskCtx(null); }}
+          onPasteTask={() => { pasteTaskAfter(taskCtx.task.id); setTaskCtx(null); }}
+          hasClipboard={!!clipboardRef.current}
           onCopyName={() => { navigator.clipboard?.writeText(taskCtx.task.name).catch(()=>{}); setTaskCtx(null); }}
           onIndent={() => { indentTaskById(taskCtx.task.id); setTaskCtx(null); }}
           onOutdent={() => { outdentTaskById(taskCtx.task.id); setTaskCtx(null); }}
           onAddNote={() => { setNotesCtx({taskId: taskCtx.task.id, projectId: taskCtx.projId}); setTaskCtx(null); }}
           onDelete={() => { deleteTask(taskCtx.task.id); setTaskCtx(null); }}
           onSetHealth={hk => { updateTask(taskCtx.task.id, {health: hk}, taskCtx.projId); setTaskCtx(null); }}
-          onSetRowColor={color => { updateTask(taskCtx.task.id, {rowColor: color ?? null}, taskCtx.projId); setTaskCtx(null); }}
+          onSetRowColor={color => { updateTask(taskCtx.task.id, {rowColor: color ?? null}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, rowColor: color ?? null}} : c); }}
+          onSetBold={v   => { updateTask(taskCtx.task.id, {bold: v},   taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, bold: v}}   : c); }}
+          onSetItalic={v => { updateTask(taskCtx.task.id, {italic: v}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, italic: v}} : c); }}
+          onClearFormat={() => { updateTask(taskCtx.task.id, {rowColor: null, bold: false, italic: false}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, rowColor: null, bold: false, italic: false}} : c); }}
           onClose={() => setTaskCtx(null)}
         />
       )}
@@ -2955,7 +3091,7 @@ function ProjContextMenu({x, y, projId, canDelete, onRename, onDuplicate, onDele
 }
 
 // ── TaskContextMenu ───────────────────────────────────────
-function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAddSubtask, onDuplicate, onCopyName, onIndent, onOutdent, onAddNote, onDelete, onSetHealth, onSetRowColor, onClose}) {
+function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAddSubtask, onDuplicate, onCopyName, onCutTask, onCopyTaskFull, onPasteTask, hasClipboard, onIndent, onOutdent, onAddNote, onDelete, onSetHealth, onSetRowColor, onSetBold, onSetItalic, onClearFormat, onClose}) {
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -2967,7 +3103,7 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
   }, [onClose]);
 
   const vw = window.innerWidth, vh = window.innerHeight;
-  const mw = 230, mh = 320;
+  const mw = 252, mh = 440;
   const left = x + mw > vw ? vw - mw - 8 : x;
   const top  = y + mh > vh ? vh - mh - 8 : y;
 
@@ -2984,11 +3120,33 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
     </div>
   );
   const Sep = () => <div style={{height:1,background:"var(--bd)",margin:"3px 0"}} />;
+  const hasAnyFmt = !!task.rowColor || !!task.bold || !!task.italic;
   const Header = () => (
     <div style={{padding:"6px 12px 5px",borderBottom:"1px solid var(--bd)",marginBottom:3}}>
       <div style={{fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",marginBottom:1}}>Task {task.id}</div>
-      <div style={{fontSize:12,fontWeight:500,color:"var(--txt)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:200}}>{task.name}</div>
+      <div style={{fontSize:12,fontWeight:task.bold?700:500,fontStyle:task.italic?"italic":"normal",color:"var(--txt)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:220}}>{task.name || <span style={{color:"var(--mut)",fontStyle:"italic"}}>New task</span>}</div>
     </div>
+  );
+
+  // Word/Excel-style format toggle button: filled-indigo when on, neutral when off.
+  // Pressed-state styling mirrors common ribbon-button conventions so the active
+  // state reads at a glance.
+  const ToggleBtn = ({active, onClick, title, children, italic=false}) => (
+    <button title={title} onClick={onClick}
+      style={{width:26,height:24,borderRadius:3,padding:0,cursor:"pointer",
+        display:"inline-flex",alignItems:"center",justifyContent:"center",
+        fontFamily:"'Inter',system-ui,sans-serif",fontSize:12,
+        fontWeight: active ? 700 : 600,
+        fontStyle: italic ? "italic" : "normal",
+        color: active ? "#fff" : "var(--txt)",
+        background: active ? "#4f46e5" : "#fff",
+        border: `1px solid ${active ? "#4338ca" : "#d1d5db"}`,
+        boxShadow: active ? "inset 0 1px 2px rgba(0,0,0,0.15)" : "none",
+        transition:"background .12s,color .12s,border-color .12s"}}
+      onMouseEnter={e=>{ if(!active){ e.currentTarget.style.background="var(--surf)"; e.currentTarget.style.borderColor="#9ca3af"; } }}
+      onMouseLeave={e=>{ if(!active){ e.currentTarget.style.background="#fff"; e.currentTarget.style.borderColor="#d1d5db"; } }}>
+      {children}
+    </button>
   );
 
   const canOutdent = task.parentId !== null;
@@ -3002,39 +3160,52 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
       <Item icon="ti-sitemap"           label="Add Subtask"                   onClick={onAddSubtask} />
       <Sep />
       <Item icon="ti-copy"              label="Duplicate Row"                 onClick={onDuplicate} />
+      <Sep />
+      <Item icon="ti-scissors"          label="Cut"               hint="Ctrl+X" onClick={onCutTask} />
+      <Item icon="ti-files"             label="Copy"              hint="Ctrl+C" onClick={onCopyTaskFull} />
+      <Item icon="ti-clipboard"         label="Paste Below"       hint="Ctrl+V" onClick={onPasteTask} disabled={!hasClipboard} />
+      <Sep />
       <Item icon="ti-clipboard-copy"    label="Copy Task Name"                onClick={onCopyName} />
       <Sep />
       <Item icon="ti-indent-increase"   label="Indent →"          hint="Alt⇧→" onClick={onIndent} />
       <Item icon="ti-indent-decrease"   label="Outdent ←"         hint="Alt⇧←" onClick={onOutdent} disabled={!canOutdent} />
       <Sep />
-      <div style={{padding:"3px 12px 2px",fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase"}}>Set Status</div>
-      {Object.entries(HEALTH).map(([k, h]) => (
-        <div key={k} onClick={() => onSetHealth(k)}
-          style={{display:"flex",alignItems:"center",gap:8,padding:"4px 12px",cursor:"pointer",fontSize:12,
-            color:task.health===k?"var(--txt)":"var(--mut)",borderRadius:4,transition:"background .1s",
-            fontFamily:"'Inter',system-ui,sans-serif",background:task.health===k?"var(--surf)":"transparent"}}
-          onMouseEnter={e=>e.currentTarget.style.background="var(--surf)"}
-          onMouseLeave={e=>e.currentTarget.style.background=task.health===k?"var(--surf)":"transparent"}>
-          <span style={{width:8,height:8,borderRadius:"50%",background:h.dot,border:h.border,flexShrink:0}} />
-          <span style={{flex:1}}>{h.label}</span>
-          {task.health===k && <i className="ti ti-check" style={{fontSize:11,color:"var(--amber)"}} />}
-        </div>
-      ))}
-      <Sep />
       <Item icon="ti-message-circle"    label="Add Note"                      onClick={onAddNote} />
       <Sep />
-      <div style={{padding:"3px 12px 4px",fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase"}}>Row Color</div>
-      <div style={{display:"flex",alignItems:"center",gap:4,padding:"4px 12px 6px",flexWrap:"wrap"}}>
-        <button title="Clear color" onClick={()=>onSetRowColor(null)}
-          style={{width:16,height:16,borderRadius:"50%",border:task.rowColor?"1px solid #d1d5db":"2px solid #6366f1",
-            background:"#fff",cursor:"pointer",flexShrink:0,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-          <svg width="8" height="8" viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9" stroke={task.rowColor?"#9ca3af":"#6366f1"} strokeWidth="1.5"/><line x1="9" y1="1" x2="1" y2="9" stroke={task.rowColor?"#9ca3af":"#6366f1"} strokeWidth="1.5"/></svg>
+      {/* Format toolbar: Word/Excel-style B / I toggles + 5x4 fill swatch grid.
+          Same fill color drives both the row background and the Gantt bar fill. */}
+      <div style={{padding:"4px 12px 2px",display:"flex",alignItems:"center",gap:6}}>
+        <div style={{fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",flex:1}}>Format</div>
+        {hasAnyFmt && (
+          <button onClick={onClearFormat} title="Clear all formatting on this task"
+            style={{fontSize:10,color:"#6b7280",background:"transparent",border:"none",cursor:"pointer",padding:"2px 4px",borderRadius:3,fontFamily:"'Inter',system-ui,sans-serif"}}
+            onMouseEnter={e=>{e.currentTarget.style.background="var(--surf)";e.currentTarget.style.color="#dc2626";}}
+            onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color="#6b7280";}}>
+            Clear
+          </button>
+        )}
+      </div>
+      <div style={{padding:"2px 12px 6px",display:"flex",alignItems:"center",gap:5}}>
+        <ToggleBtn active={!!task.bold}   onClick={()=>onSetBold(!task.bold)}     title="Bold (toggle)">B</ToggleBtn>
+        <ToggleBtn active={!!task.italic} onClick={()=>onSetItalic(!task.italic)} title="Italic (toggle)" italic>I</ToggleBtn>
+        <span style={{flex:1,fontSize:10,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".04em",paddingLeft:4}}>{task.bold && task.italic ? "Bold + Italic" : task.bold ? "Bold" : task.italic ? "Italic" : ""}</span>
+      </div>
+      <div style={{padding:"0 12px 6px",display:"grid",gridTemplateColumns:"repeat(5, 1fr)",gap:3}}>
+        {/* "No fill" tile occupies the first cell — matches Excel/Word's color picker layout */}
+        <button title="No fill (clear color)" onClick={()=>onSetRowColor(null)}
+          style={{aspectRatio:"1/1",borderRadius:3,background:"#fff",cursor:"pointer",padding:0,display:"flex",alignItems:"center",justifyContent:"center",
+            border:task.rowColor==null?"2px solid #4f46e5":"1px solid #d1d5db",
+            boxShadow:task.rowColor==null?"inset 0 0 0 1px #fff":"none"}}>
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <line x1="1" y1="1" x2="9" y2="9" stroke={task.rowColor==null?"#4f46e5":"#9ca3af"} strokeWidth="1.5"/>
+            <line x1="9" y1="1" x2="1" y2="9" stroke={task.rowColor==null?"#4f46e5":"#9ca3af"} strokeWidth="1.5"/>
+          </svg>
         </button>
-        {ROW_COLORS.map(rc => (
+        {ROW_COLORS.slice(0, 19).map(rc => (
           <button key={rc.color} title={rc.label} onClick={()=>onSetRowColor(rc.color)}
-            style={{width:16,height:16,borderRadius:"50%",background:rc.color,cursor:"pointer",flexShrink:0,padding:0,
+            style={{aspectRatio:"1/1",borderRadius:3,background:rc.color,cursor:"pointer",padding:0,
               border:task.rowColor===rc.color?"2px solid #374151":"1px solid #d1d5db",
-              boxShadow:task.rowColor===rc.color?"0 0 0 1px #fff inset":"none"}} />
+              boxShadow:task.rowColor===rc.color?"inset 0 0 0 1px #fff":"none"}} />
         ))}
       </div>
       <Sep />
@@ -4047,13 +4218,16 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
       }
       // Task name: match the level-based font size, weight, and indentation of the
       // display text so the row doesn't visibly resize when you start editing.
+      // Also honor per-task bold/italic overrides so editing matches the displayed style.
       if (col.k === "name") {
         const ls = [{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)];
         const seedVal = editStartChar != null ? editStartChar : (task.name ?? "");
+        const fw = task.bold ? 700 : ls.fontWeight;
+        const fs = task.italic ? "italic" : "normal";
         return (
           <input autoFocus className="ei"
             defaultValue={seedVal}
-            style={{fontSize:ls.fontSize, fontWeight:ls.fontWeight, paddingLeft:20+task.level*14}}
+            style={{fontSize:ls.fontSize, fontWeight:fw, fontStyle:fs, paddingLeft:20+task.level*14}}
             onFocus={e => { if (editStartChar == null) e.target.select(); }}
             onBlur={e => commit(task.id, "name", e.target.value)}
             onKeyDown={e => {
@@ -4095,7 +4269,24 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
   }
 
   switch(col.k) {
-    case "id": return <span style={{...s,...mono,color:"var(--mut)",fontSize:11,cursor:"pointer",userSelect:"none"}} title="Click to select row">{task.id}</span>;
+    case "id": {
+      // Compact format-override indicators next to the ID: small color square left of
+      // the number when a fill is set, tiny B/I letter badges right of it when those
+      // toggles are on. Lets users scan the ID column to spot formatted rows without
+      // opening the right-click menu.
+      const hasFmt = !!task.rowColor || !!task.bold || !!task.italic;
+      const fmtSummary = hasFmt
+        ? `Formatted: ${[task.rowColor && "fill color", task.bold && "bold", task.italic && "italic"].filter(Boolean).join(", ")}`
+        : "Click to select row";
+      return (
+        <span title={fmtSummary} style={{...s,...mono,color:"var(--mut)",fontSize:11,cursor:"pointer",userSelect:"none",display:"flex",alignItems:"center",gap:3,paddingLeft:s.paddingLeft||4}}>
+          {task.rowColor && <span style={{width:7,height:7,borderRadius:1.5,background:task.rowColor,border:"1px solid rgba(0,0,0,0.2)",flexShrink:0}} />}
+          <span>{task.id}</span>
+          {task.bold && <span style={{fontSize:8.5,fontWeight:800,color:"#4f46e5",lineHeight:1,fontFamily:"'Inter',system-ui,sans-serif"}}>B</span>}
+          {task.italic && <span style={{fontSize:8.5,fontWeight:700,fontStyle:"italic",color:"#4f46e5",lineHeight:1,fontFamily:"'Inter',system-ui,sans-serif"}}>I</span>}
+        </span>
+      );
+    }
     case "name": return (
       <span style={{...s,paddingLeft:4+task.level*14,gap:0,flex:1,minWidth:0}}>
         {proj?.tasks.some(t=>t.parentId===task.id) ? (
@@ -4122,8 +4313,8 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
         ) : (
           <span style={{width:16,flexShrink:0,display:"inline-block"}} />
         )}
-        {(() => { const ls=[{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)]; const isEmpty = !task.name; return (
-          <span style={{overflow:"hidden",textOverflow:"ellipsis",color:isEmpty?"var(--mut)":"#1f2328",fontStyle:isEmpty?"italic":"normal",fontSize:ls.fontSize,fontWeight:ls.fontWeight,minWidth:0}}>
+        {(() => { const ls=[{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)]; const isEmpty = !task.name; const fw = task.bold ? 700 : ls.fontWeight; const fs = (task.italic || isEmpty) ? "italic" : "normal"; return (
+          <span style={{overflow:"hidden",textOverflow:"ellipsis",color:isEmpty?"var(--mut)":"#1f2328",fontStyle:fs,fontSize:ls.fontSize,fontWeight:fw,minWidth:0}}>
             {task.name || "New task"}
           </span>
         ); })()}
@@ -4517,20 +4708,31 @@ function GanttView({tasks, updateTask, pxPerDay, onZoomChange, scrollRef, onScro
             return (
               <div key={task.id} onClick={()=>setSelectedId?.(task.id)} style={{position:"absolute",top:ri*ROW_H,left:0,right:0,height:ROW_H,borderBottom:"1px solid rgba(0,0,0,0.1)",borderLeft:isGanttSel?"3px solid var(--blue)":"3px solid transparent",background:isGanttSel?(task.rowColor||"#eff6ff"):rowBg,cursor:"default"}}>
 
+                {/* Bar fill resolution: an explicit per-task rowColor override beats the
+                    health-derived ganttBar color. Same field that paints the row background
+                    also paints the bar, so the override reads as one cohesive choice. */}
+                {(() => { return null; })()}
                 {isMilestone ? (<>
-                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,transform:"translateX(-50%)",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:lg.fontWeight,zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
-                  <div style={{position:"absolute",left:bx-6,top:11,width:12,height:12,transform:"rotate(45deg)",background:h.ganttBar,borderRadius:2,zIndex:5}} />
+                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,transform:"translateX(-50%)",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
+                  <div style={{position:"absolute",left:bx-6,top:11,width:12,height:12,transform:"rotate(45deg)",background:task.rowColor||h.ganttBar,border:task.rowColor?"1px solid rgba(0,0,0,0.25)":"none",borderRadius:2,zIndex:5}} />
                 </>) : isSummary ? (<>
-                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:lg.fontWeight,zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
+                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
                   <div style={{position:"absolute",left:bx,width:bw,top:14,height:9,zIndex:5}}>
-                    <div style={{position:"absolute",left:0,right:0,top:0,height:5,background:h.ganttBar}} />
+                    <div style={{position:"absolute",left:0,right:0,top:0,height:5,background:task.rowColor||h.ganttBar,border:task.rowColor?"1px solid rgba(0,0,0,0.2)":"none",boxSizing:"border-box"}} />
                     <div style={{position:"absolute",left:0,top:0,height:5,width:`${Math.min(100,progressMap[task.id]||0)}%`,background:"rgba(0,0,0,0.22)"}} />
-                    <div style={{position:"absolute",left:0,top:5,width:0,height:0,borderTop:`5px solid ${h.ganttBar}`,borderRight:"5px solid transparent"}} />
-                    <div style={{position:"absolute",right:0,top:5,width:0,height:0,borderTop:`5px solid ${h.ganttBar}`,borderLeft:"5px solid transparent"}} />
+                    <div style={{position:"absolute",left:0,top:5,width:0,height:0,borderTop:`5px solid ${task.rowColor||h.ganttBar}`,borderRight:"5px solid transparent"}} />
+                    <div style={{position:"absolute",right:0,top:5,width:0,height:0,borderTop:`5px solid ${task.rowColor||h.ganttBar}`,borderLeft:"5px solid transparent"}} />
                   </div>
                 </>) : (<>
-                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:lg.fontWeight,zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
-                  {h.ganttStyle === "outline" ? (
+                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
+                  {/* Outline/stripe styles are reserved for status semantics (unscheduled / paused); an
+                      explicit per-task fillColor override switches to a solid bar so the user's choice
+                      isn't visually competing with status hatching. */}
+                  {task.rowColor ? (
+                    <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,background:task.rowColor,border:"1px solid rgba(0,0,0,0.2)",boxSizing:"border-box",zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
+                      <div style={{width:`${task.percentComplete}%`,background:"rgba(0,0,0,0.18)",flexShrink:0}} />
+                    </div>
+                  ) : h.ganttStyle === "outline" ? (
                     <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,background:"transparent",border:"1.5px dashed #94a3b8",borderRadius:1,zIndex:5}} />
                   ) : h.ganttStyle === "stripe" ? (
                     <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,zIndex:5,overflow:"hidden",borderRadius:1,
