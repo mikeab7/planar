@@ -2013,7 +2013,7 @@ function App() {
 
       const newTasks = tasks.map(t => {
         if (t.id === sel.id)       return {...t, parentId: newParent.id};
-        if (t.id === newParent.id) return {...t, isExpanded: true};
+        if (t.id === newParent.id) return {...t, isExpanded: true, focused: false};
         return t;
       });
       return {...d, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(newTasks))}}};
@@ -2031,7 +2031,8 @@ function App() {
       const parent = tasks.find(t => t.id === sel.parentId);
       const grandParentId = parent ? parent.parentId : null;
 
-      const updated = tasks.map(t => t.id === sel.id ? {...t, parentId: grandParentId} : t);
+      const updated = tasks.map(t => t.id === sel.id ? {...t, parentId: grandParentId}
+        : (grandParentId !== null && t.id === grandParentId) ? {...t, focused: false} : t);
 
       // Collect all ids in parent's subtree (excluding sel itself)
       const getSubtreeIds = (rootId, tList) => {
@@ -2148,7 +2149,7 @@ function App() {
       if (!newParent || sel.parentId === newParent.id) return d;
       const newTasks = tasks.map(t => {
         if (t.id === sel.id)       return {...t, parentId: newParent.id};
-        if (t.id === newParent.id) return {...t, isExpanded: true};
+        if (t.id === newParent.id) return {...t, isExpanded: true, focused: false};
         return t;
       });
       return {...d, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(newTasks))}}};
@@ -2164,7 +2165,8 @@ function App() {
       const parent = tasks.find(t => t.id === sel.parentId);
       const grandParentId = parent ? parent.parentId : null;
 
-      const updated = tasks.map(t => t.id === sel.id ? {...t, parentId: grandParentId} : t);
+      const updated = tasks.map(t => t.id === sel.id ? {...t, parentId: grandParentId}
+        : (grandParentId !== null && t.id === grandParentId) ? {...t, focused: false} : t);
 
       const getSubtreeIds = (rootId, tList) => {
         const ids = new Set([rootId]);
@@ -3667,6 +3669,9 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                       if (c.k === "health" && e.target.closest("[data-health-dot]")) {
                         setSelectedId(task.id);
                         setSelectedColIdx(ci);
+                        // Collapse any previous range to this cell — without this, the prior
+                        // selection's range bg lingers and you see two highlighted cells.
+                        setSelRange({r1:ri, r2:ri, c1:ci, c2:ci});
                         return;
                       }
                       // ID column: clicking selects the entire row
