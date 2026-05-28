@@ -1716,9 +1716,7 @@ function App() {
                         // Fix #5: Enter on a picker column opens its picker (same as Alt+Down)
             const cell = document.querySelector(`[data-picker-cell="${col.k}-${selectedId}"]`);
             const trigger = cell?.querySelector("[data-health-dot], span[style]") || cell?.firstElementChild;
-            // HealthPicker opens on mousedown, StatusPicker on click
-            if (col.k === "health") trigger?.dispatchEvent(new MouseEvent("mousedown", {bubbles:true, cancelable:true}));
-            else trigger?.click();
+            trigger?.click();
           } else if (col.e) {
               const selTask = flatTasksRef.current.find(t => t.id === selectedId);
               const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration");
@@ -1757,9 +1755,7 @@ function App() {
           e.preventDefault();
           const cell = document.querySelector(`[data-picker-cell="${col.k}-${selectedId}"]`);
           const trigger = cell?.querySelector("[data-health-dot], span[style]") || cell?.firstElementChild;
-          // HealthPicker opens on mousedown, StatusPicker on click
-          if (col.k === "health") trigger?.dispatchEvent(new MouseEvent("mousedown", {bubbles:true, cancelable:true}));
-          else trigger?.click();
+          trigger?.click();
           return;
         }
       }
@@ -1915,7 +1911,7 @@ function App() {
       const visualOrder = sortByVisualOrder(d.projects[pid].tasks);
       const lastTask = visualOrder.length > 0 ? visualOrder[visualOrder.length - 1] : null;
       const newParentId = lastTask ? lastTask.parentId : null;
-      const task = mkt(id, "New Task", "", "", newParentId);
+      const task = mkt(id, "", "", "", newParentId);
       const tasks = [...d.projects[pid].tasks, task];
       return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(tasks))}}};
     });
@@ -1937,33 +1933,44 @@ function App() {
       const pid = d.aPid;
       const rawTasks = d.projects[pid].tasks;
 
-      // Build flat visual order (same walk as the grid display)
+      // Build flat visual order with level info (same walk as the grid display)
       const flatOrder = [];
-      const walk = (parentId) => {
+      const walk = (parentId, level) => {
         rawTasks.filter(t => t.parentId === parentId).forEach(t => {
-          flatOrder.push(t);
-          if (t.isExpanded) walk(t.id);
+          flatOrder.push({...t, level});
+          if (t.isExpanded) walk(t.id, level + 1);
         });
       };
-      walk(null);
+      walk(null, 0);
 
       // Find selected task in visual order
       const flatIdx = selectedId !== null
         ? flatOrder.findIndex(t => t.id === selectedId)
         : flatOrder.length;
 
-      // Fix #15: use selectedTask.parentId (same level as selected row).
-      // prevTask.parentId was wrong: when selected is the first child of its parent,
-      // prevTask IS the parent, so prevTask.parentId resolves to the grandparent.
       const selectedTask = flatIdx >= 0 && flatIdx < flatOrder.length ? flatOrder[flatIdx] : null;
       const prevTask     = flatIdx > 0 ? flatOrder[flatIdx - 1] : null;
-      const newParentId  = selectedTask ? selectedTask.parentId : null;
+
+      // The new task inherits the level of the visually-previous row when that row is
+      // DEEPER than the selected row (e.g., a grandchild sitting above a sibling at a
+      // shallower level — the new row continues that deeper branch). Otherwise it
+      // matches the selected row's level, which correctly handles the first-child case
+      // (row above is the parent at a shallower level → falling back to selected.parentId
+      // avoids the old prevTask-only bug of jumping up to the grandparent).
+      let newParentId;
+      if (selectedTask === null) {
+        newParentId = null;
+      } else if (prevTask && prevTask.level > selectedTask.level) {
+        newParentId = prevTask.parentId;
+      } else {
+        newParentId = selectedTask.parentId;
+      }
       // New tasks start with empty dates/duration. User fills them in or lets cascade do it
       // when they add a predecessor or set a parent. Side-effects (cascadeDates, rollupParentDates,
       // GanttView, fmtDate) all guard against empty strings now.
-      const newTask = mkt(0, "New Task", "", "", newParentId);
+      const newTask = mkt(0, "", "", "", newParentId);
 
-      // Insert in raw array directly before the selected task (same parentId = same level)
+      // Insert in raw array directly before the selected task (visual position handled by sort)
       const tasks = [...rawTasks];
       if (selectedId === null) {
         tasks.push(newTask);
@@ -2070,7 +2077,7 @@ function App() {
       const targetTask = flatIdx >= 0 ? flatOrder[flatIdx] : null;
       const newParentId = targetTask ? targetTask.parentId : null;
       // New tasks start blank (see insertTask)
-      const newTask = mkt(0, "New Task", "", "", newParentId);
+      const newTask = mkt(0, "", "", "", newParentId);
       const tasks = [...rawTasks];
       if (!targetTask) { tasks.push(newTask); }
       else { const rawIdx = tasks.findIndex(t => t.id === targetTask.id); tasks.splice(rawIdx + 1, 0, newTask); }
@@ -2087,9 +2094,27 @@ function App() {
       const rawTasks = d.projects[pid].tasks;
       const targetTask = rawTasks.find(t => t.id === taskId);
       if (!targetTask) return d;
-      const newParentId = targetTask.parentId;
+
+      // Same level-pick rule as insertTask: if the visually-previous row is deeper than
+      // the target, the new row continues that deeper branch.
+      const flatOrder = [];
+      const walk = (parentId, level) => {
+        rawTasks.filter(t => t.parentId === parentId).forEach(t => {
+          flatOrder.push({...t, level});
+          if (t.isExpanded) walk(t.id, level + 1);
+        });
+      };
+      walk(null, 0);
+      const flatIdx = flatOrder.findIndex(t => t.id === taskId);
+      const target  = flatIdx >= 0 ? flatOrder[flatIdx] : null;
+      const prev    = flatIdx > 0 ? flatOrder[flatIdx - 1] : null;
+      let newParentId;
+      if (target === null)                          newParentId = targetTask.parentId;
+      else if (prev && prev.level > target.level)   newParentId = prev.parentId;
+      else                                          newParentId = target.parentId;
+
       // New tasks start blank (see insertTask)
-      const newTask = mkt(0, "New Task", "", "", newParentId);
+      const newTask = mkt(0, "", "", "", newParentId);
       const tasks = [...rawTasks];
       const rawIdx = tasks.findIndex(t => t.id === taskId);
       if (rawIdx === -1) tasks.push(newTask);
@@ -2103,7 +2128,7 @@ function App() {
       const pid = d.aPid;
       const id = d.nTid[pid] ?? (Math.max(0, ...d.projects[pid].tasks.map(t=>t.id)) + 1);
       // New tasks start blank (see insertTask)
-      const task = mkt(id, "New Task", "", "", taskId);
+      const task = mkt(id, "", "", "", taskId);
       let tasks = [...d.projects[pid].tasks, task];
       tasks = tasks.map(t => t.id === taskId ? {...t, isExpanded: true} : t);
       return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks}}};
@@ -3790,9 +3815,11 @@ function HealthPicker({value, onChange}) {
   }, [open, value, onChange]);
 
   const handleDotClick = e => {
-    // Open on mousedown (not click) so a single press opens the menu — opening on
-    // click was unreliable because the cell's mousedown re-renders the grid first.
-    // Do NOT stopPropagation: the cell's mousedown still needs to sync row selection.
+    // Match StatusPicker exactly: open on click with stopPropagation. Earlier this was
+    // on mousedown to "win the race" against the cell re-render, but jsdom tests showed
+    // that race wasn't real — the perceived two-click was a small hit area, now fixed
+    // by the full-cell trigger below. onClick is more reliable in practice.
+    e.stopPropagation();
     document.dispatchEvent(new CustomEvent(PICKER_EVENT, {detail: idRef.current}));
     const r = dotRef.current.getBoundingClientRect();
     setPos({top: r.bottom + 4, left: r.left + r.width / 2 - 10});
@@ -3809,7 +3836,7 @@ function HealthPicker({value, onChange}) {
   };
   return (
     <>
-      <span ref={dotRef} onMouseDown={handleDotClick}
+      <span ref={dotRef} onClick={handleDotClick}
         data-health-dot="true"
         title="Set status"
         onMouseEnter={e=>{ if(!open) e.currentTarget.style.background="rgba(0,0,0,0.045)"; }}
@@ -4027,6 +4054,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
           <input autoFocus className="ei"
             defaultValue={seedVal}
             style={{fontSize:ls.fontSize, fontWeight:ls.fontWeight, paddingLeft:20+task.level*14}}
+            onFocus={e => { if (editStartChar == null) e.target.select(); }}
             onBlur={e => commit(task.id, "name", e.target.value)}
             onKeyDown={e => {
               if (e.key === "Enter")  { e.nativeEvent.stopImmediatePropagation(); commitAndAdvance(task.id, "name", e.target.value); return; }
@@ -4094,9 +4122,9 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
         ) : (
           <span style={{width:16,flexShrink:0,display:"inline-block"}} />
         )}
-        {(() => { const ls=[{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)]; return (
-          <span style={{overflow:"hidden",textOverflow:"ellipsis",color:"#1f2328",fontSize:ls.fontSize,fontWeight:ls.fontWeight,minWidth:0}}>
-            {task.name}
+        {(() => { const ls=[{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)]; const isEmpty = !task.name; return (
+          <span style={{overflow:"hidden",textOverflow:"ellipsis",color:isEmpty?"var(--mut)":"#1f2328",fontStyle:isEmpty?"italic":"normal",fontSize:ls.fontSize,fontWeight:ls.fontWeight,minWidth:0}}>
+            {task.name || "New task"}
           </span>
         ); })()}
         {task.hasChildren && task.isExpanded && task.hideableCount > 0 && (
@@ -6425,7 +6453,9 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
   };
 })();
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <ErrorBoundary><App /></ErrorBoundary>
+);
 
 </script>
 </body>
