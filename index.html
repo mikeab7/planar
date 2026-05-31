@@ -2513,6 +2513,7 @@ function App() {
   }, [selectedId]);
 
   const insertTask = useCallback(() => {
+    let newSelId = null;
     setData(d => {
       const pid = d.aPid;
       const rawTasks = d.projects[pid].tasks;
@@ -2564,8 +2565,12 @@ function App() {
         else tasks.splice(rawIdx, 0, newTask);
       }
 
-      return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(tasks)) } } };
+      const sorted = sortByVisualOrder(tasks);
+      newSelId = sorted.findIndex(t => t.id === 0) + 1;  // after renumber, id = visual position
+      return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(sorted) } } };
     });
+    // Select + reveal the freshly inserted row so it is never lost off-screen.
+    if (newSelId) setTimeout(() => { setSelectedId(newSelId); setSelRange(null); setEdit(null); }, 0);
   }, [selectedId]);
 
   // Alt+Shift+Right — indent exactly one level (child of nearest preceding task at same level)
@@ -2646,6 +2651,7 @@ function App() {
   }, [selectedId]);
 
   const insertTaskBelow = useCallback((taskId) => {
+    let newSelId = null;
     setData(d => {
       const pid = d.aPid;
       const rawTasks = d.projects[pid].tasks;
@@ -2665,14 +2671,17 @@ function App() {
       const tasks = [...rawTasks];
       if (!targetTask) { tasks.push(newTask); }
       else { const rawIdx = tasks.findIndex(t => t.id === targetTask.id); tasks.splice(rawIdx + 1, 0, newTask); }
+      newSelId = tasks.findIndex(t => t.id === 0) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(tasks) } } };
     });
+    if (newSelId) setTimeout(() => { setSelectedId(newSelId); setSelRange(null); setEdit(null); }, 0);
   }, []);
 
   // insertTaskAbove: takes taskId directly to avoid stale-closure bug in context menu
   // (context menu called setSelectedId + insertTask() but state update is async,
   //  so insertTask() always saw the old selectedId — not the right-clicked row)
   const insertTaskAbove = useCallback((taskId) => {
+    let newSelId = null;
     setData(d => {
       const pid = d.aPid;
       const rawTasks = d.projects[pid].tasks;
@@ -2703,8 +2712,10 @@ function App() {
       const rawIdx = tasks.findIndex(t => t.id === taskId);
       if (rawIdx === -1) tasks.push(newTask);
       else tasks.splice(rawIdx, 0, newTask);
+      newSelId = tasks.findIndex(t => t.id === 0) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(tasks) } } };
     });
+    if (newSelId) setTimeout(() => { setSelectedId(newSelId); setSelRange(null); setEdit(null); }, 0);
   }, []);
 
   const addSubtask = useCallback((taskId) => {
@@ -3122,7 +3133,7 @@ function App() {
 
         {/* Mode toggle pill */}
         <div className="hdr-mode" style={{display:"flex",background:"#f0f0f0",borderRadius:7,padding:"3px",gap:2,flexShrink:0}}>
-          {[["reports","Dashboard"],["projects","Projects"],["suggestions","Suggestions"]].map(([s,label]) => (
+          {[["reports","Dashboard"],["projects","Projects"],["suggestions","Updates"]].map(([s,label]) => (
             <button key={s} onClick={()=>setData(d=>({...d,section:s}))}
               style={{border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:section===s?600:500,
                 letterSpacing:".01em",padding:"5px 16px",borderRadius:5,transition:"all .15s",
@@ -4311,7 +4322,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
       switch(colKey) {
         case 'name': val = t.name||''; break;
         case 'start': case 'end': { const [y,m,d]=(t[colKey]||'').split('-'); val=`${String(+m).padStart(2,'0')}/${String(+d).padStart(2,'0')}/${(y||'').slice(2)}`; break; }
-        case 'duration': val = t.duration===0?'—':`${t.duration}d`; break;
+        case 'duration': val = (t.duration===""||t.duration==null)?'0d':(t.duration===0?'—':`${t.duration}d`); break;
         case 'health': val = HEALTH[t.health]?.label||''; break;
         case 'percentComplete': val = `${t.percentComplete||0}%`; break;
         case 'responsibleParty': val = t.responsibleParty||''; break;
@@ -4971,7 +4982,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
     case "duration":
       return <span style={{...s,...mono,color: task.hasChildren ? "#94a3b8" : "var(--mut)"}}
         title={task.hasChildren ? "Computed from subtasks" : undefined}>
-        {task.duration}d
+        {(task.duration===""||task.duration==null)?"0":task.duration}d
       </span>;
     case "predecessors": {
       const preds = normPreds(task.predecessors);
@@ -5871,7 +5882,7 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
         case 'name': val = t.name||''; break;
         case 'start': val = fmtD(t.start); break;
         case 'end': val = fmtD(t.end); break;
-        case 'duration': val = t.duration===0?'—':`${t.duration}d`; break;
+        case 'duration': val = (t.duration===""||t.duration==null)?'0d':(t.duration===0?'—':`${t.duration}d`); break;
         case 'health': val = HEALTH[t.health]?.label||''; break;
         case 'percentComplete': val = `${t.percentComplete||0}%`; break;
         case 'responsibleParty': val = t.responsibleParty||''; break;
@@ -5972,7 +5983,7 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
         return <td key={col.k} style={{...tdBase,cursor:"text"}} onClick={onCellClick} onDoubleClick={()=>setLocalEdit({id:t.id,projId:t.projId,col:"duration"})}>
           {isE(t,"duration")
             ? <input autoFocus style={{width:"100%",height:"22px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? t.duration} onBlur={e=>commit(t,"duration",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")commit(t,"duration",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
-            : <span style={{color:"var(--mut)"}}>{t.duration===""||t.duration==null?"":t.duration===0?"—":`${t.duration}d`}</span>}
+            : <span style={{color:"var(--mut)"}}>{t.duration===""||t.duration==null?"0d":t.duration===0?"—":`${t.duration}d`}</span>}
         </td>;
       case "health":
         return <td key={col.k} data-hmenu="1" onClick={onCellClick}
@@ -6392,7 +6403,7 @@ function buildPDFHtml(cfg, data, forPreview) {
   const cellVal = (t,k,tasks) => {
     switch(k){
       case "start": case "end": return fmtD(t[k]);
-      case "duration": return t.duration===0?"—":`${t.duration}d`;
+      case "duration": return (t.duration===""||t.duration==null)?"0d":(t.duration===0?"—":`${t.duration}d`);
       case "percentComplete": return `${t.percentComplete||0}%`;
       case "predecessors": return (t.predecessors||[]).map(p=>p.id||p).join(", ");
       case "health":{const h=HC[t.health]||{l:t.health,c:"#94a3b8"};return `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${h.c};flex-shrink:0;display:inline-block"></span>${escapeHtml(h.l)}</span>`;}
@@ -7096,7 +7107,13 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
 (function() {
   const SUPABASE_URL = "https://ksetjztkplttbcehyicv.supabase.co";
   const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtzZXRqenRrcGx0dGJjZWh5aWN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODk3MTksImV4cCI6MjA5NTI2NTcxOX0.7_C4mH0m7vdJ0N_TQ82o-JmDcub1xdK4sBE5kU45FDQ";
-  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  // Tolerate the Supabase script not loading (offline, or a sandboxed preview that
+  // blocks the CDN): fall back to local-only mode instead of throwing, which would
+  // white-screen the whole app. When sb is null, window.storage ops no-op and the
+  // app seeds from the embedded __PLANAR_DATA__.
+  const sb = (typeof supabase !== "undefined" && supabase && supabase.createClient)
+    ? supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+    : null;
   window.__sb = sb;            // exposed for the Suggestions view (planar_suggestions subscribe)
   const TABLE = "planar_data";
   const HISTORY_TABLE = "planar_history";
