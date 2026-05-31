@@ -1501,7 +1501,7 @@ const SGQ_HEALTH = {
 };
 const SGQ_HKEYS = ["gray","yellow","red","green","paused"];
 const SGQ_AV = ["#4f46e5","#0969da","#16a34a","#c47b00","#9333ea","#0891b2","#dc2626"];
-const SGQ_ALLOWED_PATCH = new Set(["health","duration","percentComplete","responsibleParty"]);
+const SGQ_ALLOWED_PATCH = new Set(["health","duration","end","percentComplete","responsibleParty"]);
 const SGQ_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 function sgqAvatarColor(name) {
@@ -1618,7 +1618,7 @@ function SgqChangeRow({field, fromVal, toVal, onEditTo, onRemove}) {
           </select>
         </span>
         <span className="sgq-grow"/>
-        <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>
+        {onRemove && <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>}
       </div>
     );
   }
@@ -1633,7 +1633,7 @@ function SgqChangeRow({field, fromVal, toVal, onEditTo, onRemove}) {
           onChange={e => onEditTo(Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0)))}/>
         <span style={{color:"#8b949e"}}>%</span>
         <span className="sgq-grow"/>
-        <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>
+        {onRemove && <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>}
       </div>
     );
   }
@@ -1648,7 +1648,7 @@ function SgqChangeRow({field, fromVal, toVal, onEditTo, onRemove}) {
           onChange={e => onEditTo(Math.max(0, parseInt(e.target.value, 10) || 0))}/>
         <span style={{color:"#8b949e"}}>d</span>
         <span className="sgq-grow"/>
-        <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>
+        {onRemove && <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>}
       </div>
     );
   }
@@ -1662,7 +1662,21 @@ function SgqChangeRow({field, fromVal, toVal, onEditTo, onRemove}) {
           value={toVal || ""}
           onChange={e => onEditTo(e.target.value)}/>
         <span className="sgq-grow"/>
-        <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>
+        {onRemove && <span className="sgq-x" title="Don't apply this change" onClick={onRemove}><i className="ti ti-x"/></span>}
+      </div>
+    );
+  }
+  if (field === "end") {
+    return (
+      <div className="sgq-chg">
+        <span className="sgq-field">End date</span>
+        <span className="sgq-fromval">{fromVal || "—"}</span>
+        <i className="ti ti-arrow-right sgq-toarrow"/>
+        <input className="sgq-miniinput" type="date"
+          value={toVal || ""}
+          onChange={e => onEditTo(e.target.value)}/>
+        <span className="sgq-grow"/>
+        {onRemove && <span className="sgq-x" title="Reset — don't change end date" onClick={onRemove}><i className="ti ti-x"/></span>}
       </div>
     );
   }
@@ -1756,6 +1770,7 @@ function SuggestionsView({data, updateTask}) {
       if (!SGQ_ALLOWED_PATCH.has(k)) continue;
       const v = srcPatch[k];
       if (v === undefined || v === null || v === "") continue;
+      if (target && String(target[k]) === String(v)) continue;  // skip no-op: unchanged from current value
       cleanPatch[k] = v;
     }
     const noteEntry = { id: Date.now(), date: ymd, text: String(eff.note_text || "").trim() };
@@ -1813,6 +1828,9 @@ function SuggestionsView({data, updateTask}) {
           const patchObj = eff.patch || {};
           const patchKeys = Object.keys(patchObj).filter(k =>
             SGQ_ALLOWED_PATCH.has(k) && patchObj[k] !== undefined && patchObj[k] !== null && patchObj[k] !== "");
+          // Status, Duration and End date are ALWAYS shown as editable rows (even with no AI change).
+          const SGQ_ALWAYS = ["health", "duration", "end"];
+          const displayFields = [...SGQ_ALWAYS, ...patchKeys.filter(k => !SGQ_ALWAYS.includes(k))];
           const fromName = row.email_from || "Unknown sender";
           const fromMatch = /^\s*(.*?)\s*<([^>]+)>\s*$/.exec(fromName);
           const displayName = fromMatch ? (fromMatch[1] || fromMatch[2]) : fromName;
@@ -1846,24 +1864,23 @@ function SuggestionsView({data, updateTask}) {
                   pid={eff.project_id} path={eff.task_path} ready={ready}
                   onChange={(p, pa) => patchRow(row.id, { project_id: p, task_path: pa })}/>
 
-                {patchKeys.length > 0 && (
-                  <div className="sgq-changes">
-                    <div className="sgq-lbl" style={{marginTop:0}}>Field changes</div>
-                    {patchKeys.map(k => (
-                      <SgqChangeRow key={k} field={k}
-                        fromVal={target ? target[k] : undefined}
-                        toVal={patchObj[k]}
-                        onEditTo={v => updatePatchField(row.id, k, v)}
-                        onRemove={() => removePatchField(row.id, k)}/>
-                    ))}
-                  </div>
-                )}
+                {/* Status, Duration and End date always appear here, pre-filled with the
+                    task's current value, so they can be set or fixed by hand even when the
+                    robot proposed no change. Untouched rows are skipped on approve. */}
+                <div className="sgq-changes">
+                  <div className="sgq-lbl" style={{marginTop:0}}>Field changes</div>
+                  {displayFields.map(k => (
+                    <SgqChangeRow key={k} field={k}
+                      fromVal={target ? target[k] : undefined}
+                      toVal={(k in patchObj) ? patchObj[k] : (target ? target[k] : undefined)}
+                      onEditTo={v => updatePatchField(row.id, k, v)}
+                      onRemove={(k in patchObj) ? () => removePatchField(row.id, k) : null}/>
+                  ))}
+                </div>
 
                 {(() => {
                   const ADDABLE = [
-                    {k:"health",           label:"Status",   def:"green"},
-                    {k:"duration",         label:"Duration", def:(target && target.duration != null) ? target.duration : 10},
-                    {k:"responsibleParty", label:"Owner",    def:(target && target.responsibleParty) || ""},
+                    {k:"responsibleParty", label:"Owner", def:(target && target.responsibleParty) || ""},
                   ];
                   const available = ADDABLE.filter(x => !(x.k in patchObj));
                   if (available.length === 0) return null;
