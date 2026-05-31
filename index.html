@@ -96,6 +96,11 @@
 .sgq .sgq-empty h3{ font-size:15px; font-weight:600; color:var(--txt); margin-bottom:5px; }
 .sgq .sgq-empty p{ font-size:12.5px; }
 .sgq .sgq-loading{ text-align:center; padding:40px 20px; color:#8b949e; font-size:12.5px; }
+.sgq .sgq-addchange{ margin-top:10px; }
+.sgq .sgq-addrow{ display:flex; gap:6px; flex-wrap:wrap; }
+.sgq .sgq-addbtn{ cursor:pointer; border:1px dashed var(--bd2); background:transparent; color:var(--mut); font:inherit; font-size:11px; padding:4px 10px; border-radius:6px; display:inline-flex; align-items:center; gap:4px; transition:.12s; }
+.sgq .sgq-addbtn:hover{ border-color:var(--amber); border-style:solid; color:var(--amber); background:#eef2ff; }
+.sgq .sgq-addbtn i{ font-size:13px; }
 
 html, body, #root { height: 100%; overflow: hidden; }
 body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--txt); }
@@ -1853,6 +1858,29 @@ function SuggestionsView({data, updateTask}) {
                     ))}
                   </div>
                 )}
+
+                {(() => {
+                  const ADDABLE = [
+                    {k:"health",           label:"Status",   def:"green"},
+                    {k:"duration",         label:"Duration", def:(target && target.duration != null) ? target.duration : 10},
+                    {k:"responsibleParty", label:"Owner",    def:(target && target.responsibleParty) || ""},
+                  ];
+                  const available = ADDABLE.filter(x => !(x.k in patchObj));
+                  if (available.length === 0) return null;
+                  return (
+                    <div className="sgq-addchange">
+                      <div className="sgq-lbl">Add change</div>
+                      <div className="sgq-addrow">
+                        {available.map(x => (
+                          <button key={x.k} className="sgq-addbtn"
+                            onMouseDown={() => updatePatchField(row.id, x.k, x.def)}>
+                            <i className="ti ti-plus"/>{x.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
               <div className="sgq-foot">
                 <button className="sgq-actbtn approve" disabled={!ready}
