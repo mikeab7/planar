@@ -2053,10 +2053,19 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
       const t = { id: newId, name: newTask.name, start: newTask.start, end: newTask.end, duration: newTask.duration, predecessors: newTask.predecessors, health: newTask.health, percentComplete: 0, parentId: newTask.parentId, responsibleParty: newTask.responsibleParty || '', notes: noteArr, isExpanded: true };
       let insertIdx = tasks.length;
       if (newTask.parentId != null) {
-        const desc = new Set([newTask.parentId]);
-        let changed = true; while (changed) { changed = false; tasks.forEach(x => { if (x.parentId != null && desc.has(x.parentId) && !desc.has(x.id)) { desc.add(x.id); changed = true; } }); }
-        let last = -1; tasks.forEach((x, i) => { if (desc.has(x.id)) last = i; });
-        if (last >= 0) insertIdx = last + 1;
+        // Prefer right after the predecessor it depends on, when that predecessor is a sibling under
+        // the same parent (so the task follows what must finish first) — matches the review preview.
+        const predIds = new Set((newTask.predecessors || []).map(pp => pp.id));
+        let afterPred = -1;
+        tasks.forEach((x, i) => { if (predIds.has(x.id) && x.parentId === newTask.parentId) afterPred = i; });
+        if (afterPred >= 0) {
+          insertIdx = afterPred + 1;
+        } else {
+          const desc = new Set([newTask.parentId]);
+          let changed = true; while (changed) { changed = false; tasks.forEach(x => { if (x.parentId != null && desc.has(x.parentId) && !desc.has(x.id)) { desc.add(x.id); changed = true; } }); }
+          let last = -1; tasks.forEach((x, i) => { if (desc.has(x.id)) last = i; });
+          if (last >= 0) insertIdx = last + 1;
+        }
       }
       tasks.splice(insertIdx, 0, t);
       const recomputed = rollupParentDates(cascadeDates(tasks));
@@ -2432,12 +2441,20 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
     const base = (proj && proj.tasks && proj.tasks.length) ? flattenAll(proj.tasks) : ((gridProps && gridProps.tasks) ? gridProps.tasks : []);
     if (isCreate) {
       if (!createReady || !newTask) return base;
-      if (newTask.parentId == null) return [...base, { id: '__rvnew', __rvProposed: true, __rvNew: true, level: 0 }];
+      const subtreeSet = (arr, rootId) => { const s = new Set([rootId]); let c = true; while (c) { c = false; arr.forEach(t => { if (t.parentId != null && s.has(t.parentId) && !s.has(t.id)) { s.add(t.id); c = true; } }); } return s; };
+      const lastOfSubtree = (arr, rootId) => { if (rootId == null) return -1; const s = subtreeSet(arr, rootId); let last = -1; arr.forEach((t, i) => { if (s.has(t.id)) last = i; }); return last; };
+      const predIds = new Set((newTask.predecessors || []).map(p => p.id));
+      const parentRow = newTask.parentId != null ? base.find(t => t.id === newTask.parentId) : null;
+      const row = { id: '__rvnew', __rvProposed: true, __rvNew: true, level: parentRow ? (parentRow.level || 0) + 1 : 0 };
+      // Slot the new task right after the predecessor it depends on (when that predecessor sits under the
+      // same parent) — a task should follow what must finish first. Otherwise drop it at the end of the parent's children.
+      let anchor = -1;
+      base.forEach((t, i) => { if (predIds.has(t.id) && t.parentId === newTask.parentId) anchor = i; });
+      if (anchor >= 0) anchor = lastOfSubtree(base, base[anchor].id);
+      else if (newTask.parentId != null) anchor = lastOfSubtree(base, newTask.parentId);
+      if (anchor < 0) return [...base, row];
       const out = [];
-      base.forEach(t => {
-        out.push(t);
-        if (t.id === newTask.parentId) out.push({ id: '__rvnew', __rvProposed: true, __rvNew: true, level: (t.level || 0) + 1 });
-      });
+      base.forEach((t, i) => { out.push(t); if (i === anchor) out.push(row); });
       return out;
     }
     if (!matched) return base.map(t => (t.id in sugByTask) ? { ...t, __rvPending: sugByTask[t.id] } : t);
