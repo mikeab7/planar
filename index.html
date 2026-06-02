@@ -230,6 +230,7 @@
 .rev-cascade{ flex-shrink:0; margin-top:8px; display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:500; padding:6px 11px; border-radius:9px; }
 .rev-cascade.has{ color:#c47b00; background:#fffaf0; border:1px solid #f0c98a; }
 .rev-cascade.none{ color:var(--mut); background:var(--surf); border:1px solid var(--bd); }
+.rev-cascade.dep{ color:var(--amber); background:#eef2ff; border:1px solid #c7d2fe; }
 .rev-cascade i{ font-size:16px; }
 .rev-actions{ flex-shrink:0; margin-top:10px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
 .rev-actbtns{ display:flex; align-items:center; gap:10px; margin-left:auto; }
@@ -1663,7 +1664,7 @@ const SGQ_HEALTH = {
 };
 const SGQ_HKEYS = ["gray","yellow","red","green","paused"];
 const SGQ_AV = ["#4f46e5","#0969da","#16a34a","#c47b00","#9333ea","#0891b2","#dc2626"];
-const SGQ_ALLOWED_PATCH = new Set(["health","duration","end","percentComplete","responsibleParty"]);
+const SGQ_ALLOWED_PATCH = new Set(["health","duration","end","percentComplete","responsibleParty","predecessors"]);
 const SGQ_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 function sgqAvatarColor(name) {
@@ -1957,6 +1958,7 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
   };
 
   const active = rows[activeIdx] || null;
+  const isCreate = !!(active && (active.kind === 'create_task' || (active.patch && active.patch.kind === 'create_task')));
   const eff = active ? getEff(active) : null;
   const pid = eff ? eff.project_id : null;
   const proj = (pid != null && data && data.projects) ? data.projects[pid] : null;
@@ -1965,9 +1967,29 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
     ? (proj.tasks.find(t => String(t.id) === String(rawTargetId)) || proj.tasks.find(t => t.name === rawTargetId) || null)
     : null;
   const targetId = target ? target.id : null;   // resolved numeric id — used for injection/matching
-  const matched = !!(proj && target);
+  const matched = !isCreate && !!(proj && target);   // create mode runs a separate path below
 
-  const cleanPatch = (matched && eff) ? cleanPatchFor(eff.patch, target) : {};
+  // Resolve an "add dependency" instruction (add_predecessors: [taskId|taskName, ...]) into a
+  // concrete predecessors array, merged with whatever the target already depends on.
+  const resolveTaskRef = (ref) => {
+    if (ref == null || !proj) return null;
+    return proj.tasks.find(t => String(t.id) === String(ref)) || proj.tasks.find(t => t.name === ref) || null;
+  };
+  let addedPredTasks = [];
+  let cleanPatch = (matched && eff) ? cleanPatchFor(eff.patch, target) : {};
+  if (matched && eff && eff.patch && Array.isArray(eff.patch.add_predecessors) && eff.patch.add_predecessors.length) {
+    const existing = Array.isArray(target.predecessors) ? target.predecessors : [];
+    const existingIds = new Set(existing.map(p => (p && typeof p === 'object') ? p.id : p));
+    const additions = [];
+    eff.patch.add_predecessors.forEach(ref => {
+      const t = resolveTaskRef(ref);
+      if (!t || t.id === targetId || existingIds.has(t.id)) return;
+      additions.push({ id: t.id, type: 'FS', lag: 0 });
+      addedPredTasks.push(t);
+      existingIds.add(t.id);
+    });
+    if (additions.length) cleanPatch = { ...cleanPatch, predecessors: [...existing, ...additions] };
+  }
   const previewTasks = matched ? previewProject(proj.tasks, targetId, cleanPatch) : [];
   const propById = {}; previewTasks.forEach(t => { propById[t.id] = t; });
   const propTarget = matched ? propById[targetId] : null;
@@ -1992,9 +2014,63 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
   const startChanged = target && propTarget && propTarget.start !== target.start;
   const noteText = eff ? eff.note_text : '';
 
+  // --- New-task suggestions (kind: 'create_task'): task_path points at the PARENT, patch.name is the new task ---
+  const createReady = isCreate && !!proj && !!(eff && eff.patch && typeof eff.patch.name === 'string' && eff.patch.name.trim());
+  let newTask = null, newTaskAddNames = [];
+  if (createReady) {
+    const parent = target; // in create mode, task_path's last element resolves here to the parent
+    const preds = [];
+    if (Array.isArray(eff.patch.add_predecessors)) eff.patch.add_predecessors.forEach(ref => {
+      const t = resolveTaskRef(ref); if (t) { preds.push({ id: t.id, type: 'FS', lag: 0 }); newTaskAddNames.push(t.name); }
+    });
+    const newId = proj.tasks.reduce((m, t) => Math.max(m, +t.id || 0), 0) + 1;
+    const fallbackStart = eff.patch.start || (parent ? parent.start : (proj.tasks[0] ? proj.tasks[0].start : new Date().toISOString().slice(0, 10)));
+    let dur = (eff.patch.duration != null && eff.patch.duration !== '') ? eff.patch.duration : 1;
+    if (eff.patch.end && (eff.patch.duration == null || eff.patch.duration === '')) {
+      dur = (fallbackStart && eff.patch.end) ? Math.max(0, difBD(fallbackStart, eff.patch.end) + 1) : dur;
+    }
+    let prov = { id: newId, name: eff.patch.name.trim(), start: fallbackStart, end: '', duration: dur, predecessors: preds, health: eff.patch.health || 'gray', percentComplete: 0, parentId: parent ? parent.id : null, responsibleParty: eff.patch.responsibleParty || '', notes: [], isExpanded: true };
+    prov.end = calcEnd(prov.start, prov.duration);
+    let sim = cascadeDates([...proj.tasks, prov]); sim = rollupParentDates(sim);
+    const c = sim.find(t => t.id === newId) || prov;
+    newTask = { ...prov, start: c.start, end: c.end, duration: c.duration };
+  }
+
   const flash = (msg) => { setToast({ msg }); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(null), 6500); };
 
+  const createTask = async () => {
+    if (!createReady || !newTask) return;
+    const row = active;
+    undoRef.current = { kind: 'approve', pid, tasks: JSON.parse(JSON.stringify(proj.tasks)), row, idx: activeIdx };
+    const dateMatch = row.email_date && /^(\d{4})-(\d{2})-(\d{2})$/.exec(row.email_date);
+    const ymd = dateMatch ? row.email_date : new Date().toISOString().slice(0, 10);
+    const noteArr = (noteText && String(noteText).trim()) ? [{ id: Date.now(), date: ymd, text: String(noteText).trim() }] : [];
+    setData(d => {
+      if (!d.projects || !d.projects[pid]) return d;
+      const p = d.projects[pid];
+      const tasks = p.tasks.slice();
+      const newId = tasks.reduce((m, t) => Math.max(m, +t.id || 0), 0) + 1;
+      const t = { id: newId, name: newTask.name, start: newTask.start, end: newTask.end, duration: newTask.duration, predecessors: newTask.predecessors, health: newTask.health, percentComplete: 0, parentId: newTask.parentId, responsibleParty: newTask.responsibleParty || '', notes: noteArr, isExpanded: true };
+      let insertIdx = tasks.length;
+      if (newTask.parentId != null) {
+        const desc = new Set([newTask.parentId]);
+        let changed = true; while (changed) { changed = false; tasks.forEach(x => { if (x.parentId != null && desc.has(x.parentId) && !desc.has(x.id)) { desc.add(x.id); changed = true; } }); }
+        let last = -1; tasks.forEach((x, i) => { if (desc.has(x.id)) last = i; });
+        if (last >= 0) insertIdx = last + 1;
+      }
+      tasks.splice(insertIdx, 0, t);
+      const recomputed = rollupParentDates(cascadeDates(tasks));
+      return { ...d, projects: { ...d.projects, [pid]: { ...p, tasks: recomputed } } };
+    });
+    const sb = window.__sb;
+    if (sb) { try { await sb.from('planar_suggestions').update({ status: 'approved' }).eq('id', row.id); } catch (e) { console.warn("mark approved failed:", e); } }
+    setRows(R => R.filter(r => r.id !== row.id));
+    setEdits(E => { const c = { ...E }; delete c[row.id]; return c; });
+    flash("Task created · " + newTask.name);
+  };
+
   const approve = async () => {
+    if (isCreate) { return createTask(); }
     if (!active || !matched) return;
     const row = active, p = cleanPatch;
     const dateMatch = row.email_date && /^(\d{4})-(\d{2})-(\d{2})$/.exec(row.email_date);
@@ -2046,7 +2122,7 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
       const k = e.key.toLowerCase();
       if (k === 'j' || e.key === 'ArrowRight') { e.preventDefault(); next(); }
       else if (k === 'k' || e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
-      else if (k === 'a' || e.key === 'Enter') { if (active && matched) { e.preventDefault(); approve(); } }
+      else if (k === 'a' || e.key === 'Enter') { if (active && (matched || createReady)) { e.preventDefault(); approve(); } }
       else if (k === 'x' || e.key === 'Backspace' || e.key === 'Delete') { if (active) { e.preventDefault(); dismiss(); } }
       else if (k === 'g') { e.preventDefault(); setView(v => v === 'grid' ? 'gantt' : 'grid'); }
       else if (k === 'u') { e.preventDefault(); doUndo(); }
@@ -2249,7 +2325,45 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
             })()}
           </div>
           <div className="rev-card">
-            {!matched ? (
+            {isCreate ? (
+              <React.Fragment>
+                <div className="rev-taskline">
+                  <span style={{display:"inline-flex", alignItems:"center", gap:7, minWidth:0}}>
+                    <span style={{fontSize:9.5, fontWeight:700, color:"#15803d", background:"#dcfce7", border:"1px solid #86efac", borderRadius:5, padding:"2px 6px", letterSpacing:".04em", flexShrink:0}}>NEW TASK</span>
+                    <SgqCrumb data={data} pid={pid} path={eff.task_path}/>
+                  </span>
+                </div>
+                <div className="rev-lbl" style={{ marginTop: 10 }}>Task name</div>
+                <input className="rev-note" style={{ flex:"0 0 auto", minHeight:0, height:34, fontWeight:600 }} value={(eff.patch && eff.patch.name) || ''} placeholder="New task name"
+                  onChange={e => patchRow(active.id, { patch: { ...(eff.patch || {}), name: e.target.value } })}/>
+                <div className="rev-lbl" style={{ marginTop: 10 }}>Note</div>
+                <textarea className="rev-note" rows={2} value={noteText} placeholder="Add a note to the new task…"
+                  onChange={e => patchRow(active.id, { note_text: e.target.value })}/>
+                {createReady && newTask ? (
+                  <div className="rev-cascade" style={{ color:"#15803d", background:"#ecfdf3", border:"1px solid #bbf7d0" }}>
+                    <i className="ti ti-calendar-plus"/>
+                    {"Scheduled " + rfmt(newTask.start) + "–" + rfmt(newTask.end) + " · " + newTask.duration + "d"}
+                  </div>
+                ) : null}
+                {newTaskAddNames.length ? (
+                  <div className="rev-cascade dep" style={{ marginLeft: 8 }}>
+                    <i className="ti ti-arrow-bar-to-right"/>
+                    {"Depends on " + newTaskAddNames.join(", ")}
+                  </div>
+                ) : null}
+                <div className="rev-actions">
+                  <div className="rev-qnav">
+                    <button onClick={prev} disabled={activeIdx<=0} title="Previous (K)"><i className="ti ti-chevron-left"/></button>
+                    <span className="rev-qpos">{activeIdx+1} of {rows.length}</span>
+                    <button onClick={next} disabled={activeIdx>=rows.length-1} title="Next (J)"><i className="ti ti-chevron-right"/></button>
+                  </div>
+                  <div className="rev-actbtns">
+                    <button className="rev-approve" onClick={approve} disabled={!createReady} style={!createReady ? {opacity:.5, cursor:"default"} : undefined}><i className="ti ti-plus"/>Create task</button>
+                    <button className="rev-dismiss" onClick={dismiss}><i className="ti ti-x"/>Dismiss</button>
+                  </div>
+                </div>
+              </React.Fragment>
+            ) : !matched ? (
               <React.Fragment>
                 <div className="rev-lbl">Match to a task</div>
                 <p className="rev-cardhint">This suggestion isn’t linked to a task yet. Pick one to preview the change against the plan.</p>
@@ -2273,6 +2387,12 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
                   <i className={moversList.length ? "ti ti-arrow-ramp-right-2" : "ti ti-circle-check"}/>
                   {moversList.length ? (moversList.length + " task" + (moversList.length>1?"s":"") + " shift " + (maxDelta>=0?"+":"") + maxDelta + " business day" + (Math.abs(maxDelta)>1?"s":"") + " downstream") : "No downstream schedule impact"}
                 </div>
+                {addedPredTasks.length ? (
+                  <div className="rev-cascade dep" style={{marginLeft:8}}>
+                    <i className="ti ti-arrow-bar-to-right"/>
+                    {"Adds dependency on " + addedPredTasks.map(t => t.name).join(", ")}
+                  </div>
+                ) : null}
 
                 <div className="rev-actions">
                   <div className="rev-qnav">
@@ -2310,6 +2430,16 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
   };
   const buildReviewTasks = () => {
     const base = (proj && proj.tasks && proj.tasks.length) ? flattenAll(proj.tasks) : ((gridProps && gridProps.tasks) ? gridProps.tasks : []);
+    if (isCreate) {
+      if (!createReady || !newTask) return base;
+      if (newTask.parentId == null) return [...base, { id: '__rvnew', __rvProposed: true, __rvNew: true, level: 0 }];
+      const out = [];
+      base.forEach(t => {
+        out.push(t);
+        if (t.id === newTask.parentId) out.push({ id: '__rvnew', __rvProposed: true, __rvNew: true, level: (t.level || 0) + 1 });
+      });
+      return out;
+    }
     if (!matched) return base.map(t => (t.id in sugByTask) ? { ...t, __rvPending: sugByTask[t.id] } : t);
     const out = [];
     base.forEach(t => {
@@ -2338,11 +2468,16 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
     return { ...E, [active.id]: { ...(E[active.id] || {}), patch: np } };
   });
   const reviewCtx = {
-    propStatus, propEnd, propOwner,
-    propStart: propTarget ? propTarget.start : (target ? target.start : ''),
-    startChanged: !!startChanged,
-    propDur: propTarget ? propTarget.duration : (target ? target.duration : null),
-    endChanged: !!endChanged, endDelta,
+    isCreate,
+    newName: newTask ? newTask.name : '',
+    propStatus: isCreate ? (newTask ? newTask.health : 'gray') : propStatus,
+    propEnd:    isCreate ? (newTask ? newTask.end : '') : propEnd,
+    propOwner:  isCreate ? (newTask ? (newTask.responsibleParty || '') : '') : propOwner,
+    propStart:  isCreate ? (newTask ? newTask.start : '') : (propTarget ? propTarget.start : (target ? target.start : '')),
+    startChanged: isCreate ? true : !!startChanged,
+    propDur:    isCreate ? (newTask ? newTask.duration : null) : (propTarget ? propTarget.duration : (target ? target.duration : null)),
+    addedPreds: isCreate ? newTaskAddNames : addedPredTasks.map(t => t.name),
+    endChanged: isCreate ? false : !!endChanged, endDelta,
     note: !!(noteText && String(noteText).trim()),
     onStatus: (v) => { if (active) setPatchField(active.id, 'health', v); },
     onEnd:    (v) => { if (active) setPatchExclusive({ end: v }, ['duration']); },
@@ -4743,17 +4878,17 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
   }, [selectedId, selectedColIdx, tasks]);
 
   // While reviewing, scroll the proposed/target row into view whenever the active target changes.
-  const rvTargetId = review ? (tasks.find(t => t.__rvTarget)?.id ?? null) : null;
+  const rvAnchorId = review ? (tasks.find(t => t.__rvTarget)?.id ?? tasks.find(t => t.__rvProposed)?.id ?? null) : null;
   const [rvEdit, setRvEdit] = useState(null); // which proposed-row field is being edited: "end" | "owner" | null
-  useEffect(() => { setRvEdit(null); }, [rvTargetId]);
+  useEffect(() => { setRvEdit(null); }, [rvAnchorId]);
   useEffect(() => {
-    if (!review || rvTargetId == null) return;
+    if (!review || rvAnchorId == null) return;
     const el = ref.current; if (!el) return;
-    const idx = tasks.findIndex(t => t.__rvTarget);
+    const idx = tasks.findIndex(t => t.__rvTarget) >= 0 ? tasks.findIndex(t => t.__rvTarget) : tasks.findIndex(t => t.__rvProposed);
     if (idx < 0) return;
     const id = setTimeout(() => { el.scrollTop = Math.max(0, idx * ROW_H - Math.min(120, el.clientHeight / 3)); }, 50);
     return () => clearTimeout(id);
-  }, [rvTargetId]);
+  }, [rvAnchorId]);
 
   const handleScroll = e => { setScrollTop(e.currentTarget.scrollTop); if (onScroll) onScroll(e); };
 
@@ -4920,12 +5055,19 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
             const cs = {fontSize:12, padding:"0 8px", height:ROW_H, display:"flex", alignItems:"center", overflow:"hidden", whiteSpace:"nowrap"};
             const mono = {fontFamily:"'Inter',system-ui,sans-serif"};
             const dateDisp = iso => { if (!iso) return ""; const [y,m,d] = iso.split('-'); return String(+m).padStart(2,'0')+'/'+String(+d).padStart(2,'0')+'/'+y.slice(2); };
+            const creating = !!(rv && rv.isCreate);
             return (
-              <div key="__rvprop" className="drow rv-prow" style={{top:ri*ROW_H, height:ROW_H, minWidth:totalW, background:"#f3f0ff", borderLeft:"2px solid var(--amber)"}}>
+              <div key="__rvprop" className="drow rv-prow" style={{top:ri*ROW_H, height:ROW_H, minWidth:totalW, background: creating ? "#ecfdf3" : "#f3f0ff", borderLeft: creating ? "2px solid #16a34a" : "2px solid var(--amber)"}}>
                 {orderedCols.map(c => {
                   const w = colWidths[c.k];
                   let inner = <span style={cs} />;
-                  if (c.k === "name") inner = (
+                  if (c.k === "name") inner = creating ? (
+                    <span style={{...cs, paddingLeft:4+lvl*14, gap:0, flex:1, minWidth:0}}>
+                      <span style={{width:16, flexShrink:0, display:"inline-flex", alignItems:"center", justifyContent:"center", color:"#16a34a"}}><i className="ti ti-plus" style={{fontSize:12}}/></span>
+                      <span style={{color:"#15803d", fontWeight:600, fontSize:12, overflow:"hidden", textOverflow:"ellipsis", minWidth:0}}>{rv.newName || "New task"}</span>
+                      <span style={{flexShrink:0, marginLeft:6, fontSize:8.5, fontWeight:700, color:"#15803d", background:"#dcfce7", border:"1px solid #86efac", borderRadius:4, padding:"1px 4px", letterSpacing:".04em"}}>NEW</span>
+                    </span>
+                  ) : (
                     <span style={{...cs, paddingLeft:4+lvl*14, gap:0, flex:1, minWidth:0}}>
                       <span style={{width:16, flexShrink:0, display:"inline-flex", alignItems:"center", justifyContent:"center", color:"var(--amber)"}}><i className="ti ti-corner-down-right" style={{fontSize:12}}/></span>
                       <span style={{color:"var(--amber)", fontWeight:600, fontStyle:"italic", fontSize:12, overflow:"hidden", textOverflow:"ellipsis", minWidth:0}}>proposed</span>
@@ -4939,6 +5081,9 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                         onBlur={e => { const iso = parseFlexDate(e.target.value); if (iso && rv.onEnd) rv.onEnd(iso); setRvEdit(null); }}
                         onKeyDown={e => { if (e.key==="Enter"){ e.preventDefault(); const iso=parseFlexDate(e.target.value); if(iso&&rv.onEnd) rv.onEnd(iso); setRvEdit(null); } else if (e.key==="Escape"){ setRvEdit(null); } }} />
                     : <span style={{...cs, ...mono, justifyContent:"center", color:"var(--mut)", fontSize:11, cursor:"text"}} title="Click to edit" onClick={()=>setRvEdit("end")}>{dateDisp(rv.propEnd)}</span>;
+                  else if (c.k === "predecessors") inner = (rv.addedPreds && rv.addedPreds.length)
+                    ? <span style={{...cs, color:"var(--amber)", fontWeight:600, gap:5, display:"inline-flex", alignItems:"center"}}><i className="ti ti-arrow-bar-to-right" style={{fontSize:13}}/>{rv.addedPreds.join(", ")}</span>
+                    : <span style={cs} />;
                   else if (c.k === "duration") inner = (rvEdit === "duration")
                     ? <input autoFocus className="ei" placeholder="days" defaultValue={rv.propDur!=null ? String(rv.propDur) : ""}
                         onBlur={e => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 0 && rv.onDur) rv.onDur(n); setRvEdit(null); }}
