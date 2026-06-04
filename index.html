@@ -951,70 +951,113 @@ const COLS = [
 ];
 const TOTAL_W = COLS.reduce((s,c) => s+c.w, 0);
 
-// ── Task-complete celebration ("Ring & Spark") ────────────
-// Plays once when a task transitions to Complete: the health dot pops, a green
-// ring pulses outward, and a few small sparks fan up and vanish (~0.6s total).
-// Pure Web Animations API on a fixed body-level layer — survives React
-// re-renders, escapes the grid's overflow clipping, and never blocks input.
-// Anchors to the existing data-picker-cell hooks; if the row isn't on screen
-// (virtualized out, other view) it quietly does nothing.
-function celebrateTaskComplete(taskId, projId, isActiveProj) {
+// ── Task-complete celebration ("Ring & Spark" toast) ──────
+// A small toast rises from the bottom-center when a task transitions to
+// Complete: the green dot pops in, the check draws itself, a ring pulses
+// outward, and a few sparks fan up — then it sinks away after ~2.3s.
+// Bottom-anchored (not in the row) so it stays visible even when the
+// successor prompt modal opens; z-index above all modals, pointer-events:none
+// so it never blocks a click. Pure Web Animations API on a body-level node —
+// survives React re-renders. A new completion replaces the previous toast.
+function celebrateTaskComplete(taskName) {
   try {
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    // Grid selectors are only trustworthy for the active project (task IDs
-    // repeat across projects); the master-view selector carries projId itself.
-    let cell = null;
-    if (isActiveProj) {
-      cell = document.querySelector(`[data-picker-cell="health-${taskId}"]`)
-          || document.querySelector(`[data-picker-cell="status-${taskId}"]`);
-    }
-    if (!cell) cell = document.querySelector(`[data-picker-cell="mhealth-${projId}-${taskId}"]`);
-    if (!cell) return;
-    // Innermost visible chip: stoplight pill (24×18) → status label → cell itself
-    const chip = cell.querySelector("[data-health-dot] span") || cell.querySelector("span") || cell;
-    const r = chip.getBoundingClientRect();
-    if (!r.width || r.bottom < 0 || r.top > window.innerHeight) return; // off-screen — skip
-    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    document.getElementById("planar-celebrate-toast")?.remove();
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    // 1) Dot pop — overshoot bounce; gentler when the chip is a wide label pill
-    const big = r.width > 30;
-    chip.animate(
-      big
-        ? [{transform:"scale(1)"},{transform:"scale(1.12)",offset:.35},{transform:"scale(.96)",offset:.65},{transform:"scale(1)"}]
-        : [{transform:"scale(1)"},{transform:"scale(1.3)", offset:.35},{transform:"scale(.9)", offset:.65},{transform:"scale(1)"}],
-      {duration:440, easing:"cubic-bezier(.34,1.56,.64,1)"}
-    );
+    const toast = document.createElement("div");
+    toast.id = "planar-celebrate-toast";
+    // env(safe-area-inset-bottom) keeps it clear of the iPhone home bar
+    toast.style.cssText = "position:fixed;left:50%;bottom:calc(26px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);z-index:100002;pointer-events:none;";
 
-    // 2) Ring + sparks on a throwaway fixed layer above everything (modals are ≤100000)
-    const layer = document.createElement("div");
-    layer.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;z-index:100001;pointer-events:none;";
-    document.body.appendChild(layer);
+    const card = document.createElement("div");
+    card.style.cssText = "display:flex;align-items:center;gap:11px;background:#fff;border:1px solid #d0d7de;border-radius:10px;padding:10px 16px 10px 13px;box-shadow:0 6px 24px rgba(27,31,36,.16),0 1px 3px rgba(27,31,36,.08);font-family:'Inter',system-ui,-apple-system,sans-serif;";
+    toast.appendChild(card);
 
+    // Dot + ring + sparks share one positioning context; nothing in the
+    // ancestor chain clips, so sparks can fly past the card's top edge.
+    const dotWrap = document.createElement("span");
+    dotWrap.style.cssText = "position:relative;width:20px;height:20px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;";
     const ring = document.createElement("span");
-    ring.style.cssText = `position:fixed;left:${cx - 6.5}px;top:${cy - 6.5}px;width:13px;height:13px;border-radius:50%;border:2px solid #16a34a;pointer-events:none;`;
-    layer.appendChild(ring);
-    ring.animate(
-      [{transform:"scale(1)", opacity:.55},{transform:"scale(3.2)", opacity:0}],
-      {duration:600, easing:"cubic-bezier(.22,1,.36,1)", fill:"forwards"}
-    );
+    ring.style.cssText = "position:absolute;left:50%;top:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:2px solid #16a34a;opacity:0;";
+    const dot = document.createElement("span");
+    dot.style.cssText = "position:relative;width:20px;height:20px;border-radius:50%;background:#16a34a;display:inline-flex;align-items:center;justify-content:center;";
+    dot.innerHTML = '<svg width="12" height="12" viewBox="0 0 13 13" fill="none"><path d="M3 6.7 L5.5 9.2 L10 3.8" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="stroke-dasharray:14;stroke-dashoffset:14;"/></svg>';
+    dotWrap.appendChild(ring);
+    dotWrap.appendChild(dot);
+    card.appendChild(dotWrap);
 
+    // textContent (not innerHTML) so task names can never inject markup
+    const text = document.createElement("span");
+    const nameEl = document.createElement("div");
+    nameEl.style.cssText = "font-size:12.5px;font-weight:600;color:#1f2328;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.35;";
+    nameEl.textContent = (taskName || "Task").toString();
+    const subEl = document.createElement("div");
+    subEl.style.cssText = "font-size:11px;font-weight:500;color:#15803d;line-height:1.35;";
+    subEl.textContent = "Marked complete";
+    text.appendChild(nameEl); text.appendChild(subEl);
+    card.appendChild(text);
+
+    document.body.appendChild(toast);
+
+    const chk  = dot.querySelector("path");
+    const LIFE = 2300; // ms fully visible before the exit begins
+    const exit = (dur) => {
+      toast.animate(
+        [{transform:"translateX(-50%) translateY(0)", opacity:1},
+         {transform:"translateX(-50%) translateY(10px)", opacity:0}],
+        {duration:dur, easing:"cubic-bezier(.4,0,1,1)", fill:"forwards"}
+      );
+      setTimeout(() => toast.remove(), dur + 30);
+    };
+
+    if (reduce) {
+      // Reduced motion: keep the informative toast, drop the theatrics
+      if (chk) chk.style.strokeDashoffset = "0";
+      toast.animate([{opacity:0},{opacity:1}], {duration:150, fill:"forwards"});
+      setTimeout(() => exit(200), LIFE);
+      return;
+    }
+
+    // Entry: rise with a slight overshoot
+    toast.animate(
+      [{transform:"translateX(-50%) translateY(16px)", opacity:0},
+       {transform:"translateX(-50%) translateY(-2px)", opacity:1, offset:.7},
+       {transform:"translateX(-50%) translateY(0)",    opacity:1}],
+      {duration:300, easing:"cubic-bezier(.22,1,.36,1)", fill:"forwards"}
+    );
+    // Dot pops into existence
+    dot.animate(
+      [{transform:"scale(.4)"},{transform:"scale(1.28)",offset:.55},{transform:"scale(.95)",offset:.8},{transform:"scale(1)"}],
+      {duration:420, delay:90, easing:"cubic-bezier(.34,1.56,.64,1)", fill:"backwards"}
+    );
+    // Check draws in (style fallback in case WAAPI can't tween SVG dashoffset)
+    if (chk) {
+      chk.animate([{strokeDashoffset:14},{strokeDashoffset:0}], {duration:320, delay:200, easing:"cubic-bezier(.65,0,.35,1)", fill:"forwards"});
+      setTimeout(() => { chk.style.strokeDashoffset = "0"; }, 540);
+    }
+    // Ring pulses outward
+    ring.animate(
+      [{transform:"scale(.9)", opacity:.55},{transform:"scale(2.6)", opacity:0}],
+      {duration:620, delay:160, easing:"cubic-bezier(.22,1,.36,1)", fill:"forwards"}
+    );
+    // Sparks fan upward out of the card
     const colors = ["#16a34a","#22c55e","#4f46e5","#16a34a","#34d399","#4f46e5"];
     const N = 6;
     for (let i = 0; i < N; i++) {
       const s = document.createElement("span");
-      s.style.cssText = `position:fixed;left:${cx - 2.5}px;top:${cy - 2.5}px;width:5px;height:5px;border-radius:50%;background:${colors[i % colors.length]};pointer-events:none;`;
-      layer.appendChild(s);
+      s.style.cssText = `position:absolute;left:50%;top:50%;width:5px;height:5px;margin:-2.5px 0 0 -2.5px;border-radius:50%;background:${colors[i % colors.length]};opacity:0;`;
+      dotWrap.appendChild(s);
       const ang  = (-90 + (i / (N - 1) - 0.5) * 150) * Math.PI / 180; // fan upward
-      const dist = 20 + Math.random() * 14;
+      const dist = 22 + Math.random() * 14;
       const dx = Math.cos(ang) * dist, dy = Math.sin(ang) * dist;
       s.animate(
         [{transform:"translate(0,0) scale(1)",                       opacity:1},
          {transform:`translate(${dx*.55}px,${dy*.55}px) scale(.7)`,  opacity:1, offset:.4},
          {transform:`translate(${dx}px,${dy}px) scale(.35)`,         opacity:0}],
-        {duration:580, easing:"cubic-bezier(.18,.7,.3,1)", fill:"forwards"}
+        {duration:580, delay:170, easing:"cubic-bezier(.18,.7,.3,1)", fill:"forwards"}
       );
     }
-    setTimeout(() => layer.remove(), 660);
+    setTimeout(() => exit(240), LIFE);
   } catch (e) { /* celebration is decorative — never let it break a real update */ }
 }
 
@@ -3196,10 +3239,10 @@ function App() {
         const pid2 = projId ?? snap.aPid;
         const oldTask = snap.projects[pid2]?.tasks.find(t => t.id === taskId);
         if (oldTask && oldTask.health !== 'green') {
-          // Ring & Spark: fire just after React paints the freshly-green dot,
-          // ahead of the successor prompt (80ms) so the pop lands on screen first.
-          const isActiveProj = pid2 === snap.aPid;
-          setTimeout(() => celebrateTaskComplete(taskId, pid2, isActiveProj), 60);
+          // Ring & Spark toast: fire just after React paints the green state.
+          // Bottom-anchored, so it stays visible when the successor prompt
+          // opens at 80ms (and works from any view — grid, master, review).
+          setTimeout(() => celebrateTaskComplete(oldTask.name), 60);
           setTimeout(() => {
             const d = dataRef.current;
             if (!d) return;
@@ -5285,8 +5328,13 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                         setSelRange({r1:ri, r2:ri, c1:ci, c2:ci});
                         return;
                       }
-                      // ID column: clicking selects the entire row
+                      // ID column — Excel row-header behavior: click selects the
+                      // whole row, and dragging up/down extends the selection
+                      // across full rows. rowMode tells onMouseEnter to span all
+                      // columns no matter which column the pointer crosses.
                       if (c.k === "id") {
+                        dragAnchor.current = {ri, ci: 0, rowMode: true};
+                        isDraggingCells.current = true;
                         setSelectedId(task.id);
                         setSelectedColIdx(0);
                         setSelRange({r1:ri, r2:ri, c1:0, c2:COLS.length-1});
@@ -5301,6 +5349,14 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                     }}
                     onMouseEnter={() => {
                       if (!isDraggingCells.current || !dragAnchor.current) return;
+                      // Row-header drag: always span every column, regardless of
+                      // which column the pointer happens to pass through.
+                      if (dragAnchor.current.rowMode) {
+                        setSelRange({r1:dragAnchor.current.ri, r2:ri, c1:0, c2:COLS.length-1});
+                        setSelectedId(task.id);
+                        setSelectedColIdx(0);
+                        return;
+                      }
                       setSelRange({r1:dragAnchor.current.ri, r2:ri, c1:dragAnchor.current.ci, c2:ci});
                       setSelectedId(task.id);
                       setSelectedColIdx(ci);
@@ -6836,7 +6892,7 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
             : <span style={{color:"var(--mut)"}}>{t.duration===""||t.duration==null?"":t.duration===0?"—":`${t.duration}d`}</span>}
         </td>;
       case "health":
-        return <td key={col.k} data-hmenu="1" data-picker-cell={`mhealth-${t.projId}-${t.id}`} onClick={onCellClick}
+        return <td key={col.k} data-hmenu="1" onClick={onCellClick}
           onDoubleClick={()=>setLocalEdit({id:t.id,projId:t.projId,col:"health"})}
           style={{...tdBase,cursor:"default",position:"relative",
             overflow:isE(t,"health")?"visible":"hidden",
