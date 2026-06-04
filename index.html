@@ -201,13 +201,13 @@
 .rev-subject{ margin-top:13px; font-weight:600; font-size:14px; display:flex; align-items:center; gap:9px; flex-wrap:wrap; color:var(--txt); }
 .rev-tgtpill{ font-size:11.5px; font-weight:500; color:var(--amber); background:#eef2ff; padding:2px 9px; border-radius:6px; display:inline-flex; align-items:center; gap:5px; }
 .rev-tgtpill i{ font-size:13px; }
-.rev-body{ margin-top:10px; font-size:13px; line-height:1.65; color:var(--txt); white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
+.rev-mailbody{ margin-top:10px; font-size:13px; line-height:1.65; color:var(--txt); white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
 .rev-quotewrap{ margin-top:12px; }
 .rev-quote-toggle{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:500; color:var(--blue); background:none; border:none; cursor:pointer; padding:4px 0; font-family:inherit; }
 .rev-quote-toggle:hover{ text-decoration:underline; }
 .rev-quoted{ margin-top:8px; padding:8px 0 2px 12px; border-left:2px solid var(--bd2); color:var(--mut); font-size:12px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
 .rev-bodywrap{ position:relative; margin-top:10px; }
-.rev-bodywrap .rev-body{ margin-top:0; }
+.rev-bodywrap .rev-mailbody{ margin-top:0; }
 .rev-fade{ position:absolute; left:0; right:0; bottom:0; height:46px; background:linear-gradient(to bottom, rgba(255,255,255,0), var(--bg) 92%); pointer-events:none; }
 .rev-readmore{ margin-top:8px; display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; color:var(--amber); background:none; border:none; cursor:pointer; padding:3px 0; font-family:inherit; }
 .rev-readmore:hover{ text-decoration:underline; }
@@ -219,7 +219,7 @@
 .rev-reader-close:hover{ border-color:var(--amber); color:var(--amber); }
 .rev-reader-subject{ flex-shrink:0; padding:14px 18px 0; font-weight:600; font-size:15px; color:var(--txt); }
 .rev-reader-body{ flex:1; min-height:0; overflow:auto; padding:4px 18px 20px; }
-.rev-reader-body .rev-body{ font-size:13.5px; line-height:1.7; }
+.rev-reader-body .rev-mailbody{ font-size:13.5px; line-height:1.7; }
 .rev-lbl{ flex-shrink:0; font-size:10.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:#8b949e; margin:0 0 8px; }
 .rev-cardhint{ font-size:12px; color:var(--mut); line-height:1.5; margin-bottom:10px; }
 .rev-taskline{ flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:12.5px; color:var(--txt); }
@@ -2314,7 +2314,7 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
               return (
                 <React.Fragment>
                   <div className="rev-bodywrap">
-                    <div className="rev-body" ref={mailBodyRef} style={{maxHeight:156, overflow:"hidden"}}>{ce.body || "(no body)"}</div>
+                    <div className="rev-mailbody" ref={mailBodyRef} style={{maxHeight:156, overflow:"hidden"}}>{ce.body || "(no body)"}</div>
                     {mailOverflow ? <div className="rev-fade"/> : null}
                   </div>
                   {mailOverflow
@@ -2534,7 +2534,7 @@ function SuggestionsView({data, updateTask, setData, rows, setRows, loading, onC
             <div className="rev-reader-body">
               {(() => { const ce = cleanEmailBody(active.email_body); return (
                 <React.Fragment>
-                  <div className="rev-body" style={{marginTop:0}}>{ce.body || "(no body)"}</div>
+                  <div className="rev-mailbody" style={{marginTop:0}}>{ce.body || "(no body)"}</div>
                   {ce.hasQuoted ? (
                     <div className="rev-quotewrap">
                       <button className="rev-quote-toggle" onClick={() => setShowQuoted(q => !q)}>
@@ -2575,6 +2575,7 @@ function App() {
   // global keydown handler runs in a stable effect and would otherwise capture a
   // stale value. Shape: { mode: "copy"|"cut", tasks: [deep-copied subtree], sourceProjId, sourceRootId }
   const clipboardRef = useRef(null);
+  const pasteSelectRef = useRef(null); // new id of the just-pasted root → select + scroll to it after paste
   const [, setClipboardTick] = useState(0); // bump to force re-render when clipboard changes (for menu/visual cues)
   const [renameModal, setRenameModal] = useState(null);
   const [edit,       setEdit]       = useState(null);
@@ -3034,7 +3035,12 @@ function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectedId, selectedColIdx, selRange, deleteTask, insertTask, indentTask, outdentTask, isUndoing]);
+    // NOTE: deleteTask/insertTask/indentTask/outdentTask are intentionally NOT in this dependency
+    // array. They are defined later in this component and only depend on selectedId, which IS a
+    // dependency here — so the listener re-binds (capturing fresh callbacks) whenever they change.
+    // Referencing them directly here would read them before initialization if the build ever kept
+    // `const` block-scoping instead of hoisting to `var`.
+  }, [selectedId, selectedColIdx, selRange, isUndoing]);
 
   // Ctrl+scroll → zoom Gantt timeline instead of browser zoom
   // RAF-throttled so rapid scrolling doesn't overwhelm React with renders
@@ -3413,6 +3419,8 @@ function App() {
     if (subtree.length === 0) return;
     clipboardRef.current = { mode: "copy", tasks: subtree, sourceProjId: pid, sourceRootId: taskId };
     setClipboardTick(t => t + 1);
+    const extra = subtree.length - 1;
+    showToast(`Copied “${subtree[0].name || "task"}”${extra > 0 ? ` + ${extra} subtask${extra > 1 ? "s" : ""}` : ""}`, { duration: 1800 });
   }, []);
   const cutTaskById = useCallback((taskId) => {
     const pid = dataRef.current?.aPid;
@@ -3422,6 +3430,8 @@ function App() {
     if (subtree.length === 0) return;
     clipboardRef.current = { mode: "cut", tasks: subtree, sourceProjId: pid, sourceRootId: taskId };
     setClipboardTick(t => t + 1);
+    const extra = subtree.length - 1;
+    showToast(`Cut “${subtree[0].name || "task"}”${extra > 0 ? ` + ${extra} subtask${extra > 1 ? "s" : ""}` : ""} — paste to move`, { duration: 1800 });
   }, []);
   const pasteTaskAfter = useCallback((targetId) => {
     const cb = clipboardRef.current;
@@ -3466,14 +3476,32 @@ function App() {
         final = result.filter(t => !sourceIds.has(t.id));
       }
 
+      // Normalize ordering/IDs, and record where the pasted root landed so we can select it.
+      const sorted = sortByVisualOrder(final);
+      const rootTempId = idMap[cb.sourceRootId];
+      const rootIdx = sorted.findIndex(t => t.id === rootTempId);
+      pasteSelectRef.current = rootIdx >= 0 ? rootIdx + 1 : null; // renumberTasks assigns id = index + 1
+
       return {
         ...d,
-        projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(final))}}
+        projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sorted)}}
       };
     });
+    const n = cb.tasks.length;
+    showToast(`Pasted ${n} task${n > 1 ? "s" : ""}`, { duration: 1600 });
     // Cut is one-shot (move semantics); copy stays in the clipboard for repeated pastes.
     if (cb.mode === "cut") { clipboardRef.current = null; setClipboardTick(t => t + 1); }
   }, []);
+
+  // After a paste commits, select the pasted root so it highlights and the grid scrolls to it.
+  useEffect(() => {
+    if (pasteSelectRef.current == null) return;
+    const id = pasteSelectRef.current;
+    pasteSelectRef.current = null;
+    setSelectedId(id);
+    setSelRange(null);
+    setSelectedColIdx(1);
+  }, [data]);
 
   const indentTaskById = useCallback((taskId) => {
     setData(d => {
@@ -4873,7 +4901,6 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
   const hasRange = rangeRowCount > 1 || rangeColCount > 1;
 
   const colWidthsRef = useRef(null);
-  useEffect(() => { colWidthsRef.current = colWidths; if (onColWidths) onColWidths(colWidths); }, [colWidths]);
 
   useEffect(() => {
     if (selectedId === null) return;
@@ -4886,7 +4913,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
       if (rowTop < visTop)            el.scrollTop = rowTop - TL_H;
       else if (rowBottom > visBottom) el.scrollTop = rowBottom - el.clientHeight;
     }
-    const cw = colWidthsRef.current;
+    const cw = colWidthsRef.current || {};
     const colLeft  = COLS.slice(0, selectedColIdx).reduce((s, c) => s + (cw[c.k] || c.w), 0);
     const colRight = colLeft + (cw[COLS[selectedColIdx]?.k] || 0);
     const visLeft  = el.scrollLeft, visRight = el.scrollLeft + el.clientWidth;
@@ -4956,6 +4983,10 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
     const saved = data.gridColWidths || {};
     return Object.fromEntries(COLS.map(c => [c.k, saved[c.k] ?? c.w]));
   });
+  // Sync the ref during render (runs before any effect), so effects/handlers that read
+  // colWidthsRef.current always see current widths — no dependence on effect order, no TDZ.
+  colWidthsRef.current = colWidths;
+  useEffect(() => { if (onColWidths) onColWidths(colWidths); }, [colWidths]);
 
   const [colOrder, setColOrder] = useState(() => {
     const saved = data.gridColOrder;
@@ -4981,11 +5012,14 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
   const startResize = (colKey, e) => {
     e.preventDefault(); e.stopPropagation();
     const startX = e.clientX, startW = colWidths[colKey];
-    const move = ev => setColWidths(w => ({...w, [colKey]: Math.max(36, startW + ev.clientX - startX)}));
+    let latestW = startW;
+    const move = ev => { latestW = Math.max(36, startW + ev.clientX - startX); setColWidths(w => ({...w, [colKey]: latestW})); };
     const up = () => {
       document.removeEventListener("mousemove", move);
       document.removeEventListener("mouseup", up);
-      setColWidths(w => { setData(d => ({...d, gridColWidths: w})); return w; });
+      // Persist on release, in the handler — calling setData inside a setColWidths updater
+      // would run setData during render (React warns + can loop).
+      setData(d => ({...d, gridColWidths: {...colWidths, [colKey]: latestW}}));
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
@@ -5016,7 +5050,9 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
       if (val) maxW = Math.max(maxW, ctx.measureText(val).width + 24);
     });
     const nw = Math.max(36, Math.ceil(maxW));
-    setColWidths(w => { const n={...w,[colKey]:nw}; setData(d=>({...d,gridColWidths:n})); return n; });
+    const n = {...colWidths, [colKey]: nw};
+    setColWidths(n);
+    setData(d => ({...d, gridColWidths: n}));
   };
 
   return (
@@ -5163,8 +5199,8 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                           } else {
                             setSelRange({r1: anchorRi, r2: ri, c1: anchorCi, c2: ci});
                           }
-                          // Focus the table so subsequent keyboard nav works
-                          setTimeout(()=>tableWrapRef.current?.focus({preventScroll:true}), 0);
+                          // Keep focus on the grid container; keyboard nav is handled at the document level.
+                          setTimeout(()=>ref.current?.focus({preventScroll:true}), 0);
                           return;
                         }
                       }
@@ -5293,7 +5329,9 @@ function HealthPicker({value, onChange}) {
       if (e.key === "ArrowDown") { setHiIdx(i => Math.min(HK.length - 1, i + 1)); return; }
       if (e.key === "ArrowUp")   { setHiIdx(i => Math.max(0, i - 1)); return; }
       if (e.key === "Enter" || e.key === " ") {
-        setHiIdx(i => { onChange(HK[i] ?? value); setOpen(false); return i; });
+        // Read the highlighted index via the updater (its closure is stale), but defer the
+        // commit + close so they don't run setState during render.
+        setHiIdx(i => { const sel = HK[i] ?? value; setTimeout(() => { onChange(sel); setOpen(false); }, 0); return i; });
       }
     };
     document.addEventListener("keydown", handleKey, true); // capture = true
@@ -5407,7 +5445,7 @@ function StatusPicker({value, onChange}) {
       if (e.key === "ArrowDown") { setHiIdx(i => Math.min(HK.length - 1, i + 1)); return; }
       if (e.key === "ArrowUp")   { setHiIdx(i => Math.max(0, i - 1)); return; }
       if (e.key === "Enter" || e.key === " ") {
-        setHiIdx(i => { onChange(HK[i] ?? value); setOpen(false); return i; });
+        setHiIdx(i => { const sel = HK[i] ?? value; setTimeout(() => { onChange(sel); setOpen(false); }, 0); return i; });
       }
     };
     document.addEventListener("keydown", handleKey, true);
@@ -6591,12 +6629,13 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
   const startResize = (colKey, e) => {
     e.preventDefault(); e.stopPropagation();
     const startX = e.clientX, startW = colWidths[colKey];
-    const move = ev => setColWidths(w => ({...w, [colKey]: Math.max(40, startW + ev.clientX - startX)}));
+    let latestW = startW;
+    const move = ev => { latestW = Math.max(40, startW + ev.clientX - startX); setColWidths(w => ({...w, [colKey]: latestW})); };
     const up = () => {
       document.removeEventListener("mousemove", move);
       document.removeEventListener("mouseup", up);
       document.body.style.cursor = "";
-      setColWidths(w => { setData(d => ({...d, masterColWidths: w})); return w; });
+      setData(d => ({...d, masterColWidths: {...colWidths, [colKey]: latestW}}));
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
@@ -6634,7 +6673,9 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
       if (val) maxW = Math.max(maxW, ctx.measureText(val).width + 24);
     });
     const nw = Math.max(40, Math.ceil(maxW));
-    setColWidths(w => { const n={...w,[colKey]:nw}; setData(d=>({...d,masterColWidths:n})); return n; });
+    const n = {...colWidths, [colKey]: nw};
+    setColWidths(n);
+    setData(d => ({...d, masterColWidths: n}));
   };
 
   const activeCols = visCols.map(k => MASTER_COL_DEFS.find(c => c.k === k)).filter(Boolean);
