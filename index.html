@@ -294,6 +294,9 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color
 .ei { background: #ffffff; border: 1px solid var(--blue); outline: none; color: #1f2328;
   padding: 0 6px; font-size: 12px; font-family: 'Inter', system-ui, sans-serif; height: 36px; width: 100%; }
 select.ei { cursor: pointer; }
+/* Editors inside grid rows: fit the fixed 24px row exactly — the 36px base
+   height is for larger form contexts and overflows/misaligns inside rows */
+.drow .ei { height: 24px; border-radius: 0; }
 .drow { display: flex; border-bottom: 1px solid var(--bd); border-left: 2px solid transparent;
   position: absolute; left: 0; right: 0; }
 .drow:hover { box-shadow: inset 0 1px 0 #94a3b8, inset 0 -1px 0 #94a3b8; }
@@ -1396,7 +1399,7 @@ function ContactPicker({ value, contacts, onCommit, onCancel, variant = "master"
     }
   }
 
-  const masterInputStyle = { width:'100%', height:'22px', border:'none', borderBottom:'1.5px solid var(--blue)',
+  const masterInputStyle = { display:'block', width:'100%', height:'18px', border:'none', borderBottom:'1.5px solid var(--blue)',
     outline:'none', background:'transparent', color:'var(--txt)', fontSize:12, fontFamily:'inherit', padding:'0 2px' };
 
   const dropdown = (totalItems > 0 && pos) ? ReactDOM.createPortal(
@@ -3377,6 +3380,115 @@ function App() {
     return ft.slice(r1, r2 + 1).map(t => t.id);
   };
 
+  // ── Formatting scope (row vs cell) ────────────────────────
+  // The right-click menu's format toolbar targets whatever was selected when
+  // it opened: a full-row selection containing the clicked row formats the
+  // row(s) — task-level bold/italic/rowColor, the original behavior — while
+  // any other selection formats just the selected cell(s) via per-cell
+  // entries stored on the task as cellFmt: { [colKey]: {bold, italic, fill} }.
+  const fmtTargets = () => {
+    const rowIds = fullRowSelIds();
+    if (rowIds.length && taskCtx && rowIds.includes(taskCtx.task.id)) return {mode: 'row', ids: rowIds};
+    const ft = flatTasksRef.current || [];
+    const cells = [];
+    if (selRange && ft.length) {
+      const r1 = Math.max(0, Math.min(selRange.r1, selRange.r2)), r2 = Math.min(ft.length - 1, Math.max(selRange.r1, selRange.r2));
+      const c1 = Math.max(0, Math.min(selRange.c1, selRange.c2)), c2 = Math.min(COLS.length - 1, Math.max(selRange.c1, selRange.c2));
+      for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) cells.push({taskId: ft[r].id, colKey: COLS[c].k});
+    } else if (taskCtx) {
+      cells.push({taskId: taskCtx.task.id, colKey: COLS[selectedColIdx]?.k || 'name'});
+    }
+    return {mode: 'cell', cells};
+  };
+
+  // Merge a format patch ({bold}/{italic}/{fill}, or clearAll) into the
+  // current targets in ONE data pass (one undo step), then patch the open
+  // menu's task snapshot so its toolbar indicators update live.
+  const applyFormatAndSync = (patch, {clearAll = false} = {}) => {
+    const tgt = fmtTargets();
+    const pid = taskCtx?.projId ?? dataRef.current?.aPid;
+    const mergeCell = (entry) => {
+      const e = {...(entry || {})};
+      if ('bold' in patch) e.bold = patch.bold;
+      if ('italic' in patch) e.italic = patch.italic;
+      if ('fill' in patch) e.fill = patch.fill;
+      return (e.bold || e.italic || e.fill) ? e : null; // prune empty entries
+    };
+    setData(d => {
+      const proj = d.projects[pid]; if (!proj) return d;
+      let tasks;
+      if (tgt.mode === 'row') {
+        const idset = new Set(tgt.ids);
+        tasks = proj.tasks.map(t => {
+          if (!idset.has(t.id)) return t;
+          if (clearAll) { const {cellFmt, ...rest} = t; return {...rest, rowColor: null, bold: false, italic: false}; }
+          const u = {...t};
+          if ('bold' in patch) u.bold = patch.bold;
+          if ('italic' in patch) u.italic = patch.italic;
+          if ('fill' in patch) u.rowColor = patch.fill;
+          return u;
+        });
+      } else {
+        const byTask = {};
+        tgt.cells.forEach(({taskId, colKey}) => { (byTask[taskId] = byTask[taskId] || []).push(colKey); });
+        tasks = proj.tasks.map(t => {
+          const cols = byTask[t.id]; if (!cols) return t;
+          const cf = {...(t.cellFmt || {})};
+          cols.forEach(k => {
+            const e = clearAll ? null : mergeCell(cf[k]);
+            if (e) cf[k] = e; else delete cf[k];
+          });
+          if (Object.keys(cf).length) return {...t, cellFmt: cf};
+          const {cellFmt, ...rest} = t; return rest;
+        });
+      }
+      return {...d, projects: {...d.projects, [pid]: {...proj, tasks}}};
+    });
+    setTaskCtx(c => {
+      if (!c) return c;
+      const t = {...c.task};
+      if (tgt.mode === 'row') {
+        if (clearAll) { t.rowColor = null; t.bold = false; t.italic = false; delete t.cellFmt; }
+        else {
+          if ('bold' in patch) t.bold = patch.bold;
+          if ('italic' in patch) t.italic = patch.italic;
+          if ('fill' in patch) t.rowColor = patch.fill;
+        }
+      } else {
+        const key = COLS[selectedColIdx]?.k || 'name';
+        const cf = {...(t.cellFmt || {})};
+        const e = clearAll ? null : mergeCell(cf[key]);
+        if (e) cf[key] = e; else delete cf[key];
+        if (Object.keys(cf).length) t.cellFmt = cf; else delete t.cellFmt;
+      }
+      return {...c, task: t};
+    });
+  };
+
+  // Toolbar state for the open context menu: which indicators light up, what
+  // the eraser may clear, and a small scope label ("Cell", "Row", "3 rows"…).
+  // In cell mode the eraser only clears cell formats — row-level formatting
+  // is cleared by selecting the row (ID column) and erasing there.
+  const ctxFmtState = () => {
+    if (!taskCtx) return null;
+    const tgt = fmtTargets();
+    if (tgt.mode === 'row') {
+      const t = taskCtx.task;
+      return {mode: 'row', bold: !!t.bold, italic: !!t.italic, fill: t.rowColor || null,
+        hasAny: !!(t.bold || t.italic || t.rowColor || (t.cellFmt && Object.keys(t.cellFmt).length)),
+        scopeLabel: tgt.ids.length > 1 ? `${tgt.ids.length} rows` : 'Row'};
+    }
+    const key = COLS[selectedColIdx]?.k || 'name';
+    const e = taskCtx.task.cellFmt?.[key] || {};
+    const ft = flatTasksRef.current || [];
+    const hasAny = tgt.cells.some(({taskId, colKey}) => {
+      const t = ft.find(x => x.id === taskId); const f = t?.cellFmt?.[colKey];
+      return !!(f && (f.bold || f.italic || f.fill));
+    });
+    return {mode: 'cell', bold: !!e.bold, italic: !!e.italic, fill: e.fill || null, hasAny,
+      scopeLabel: tgt.cells.length > 1 ? `${tgt.cells.length} cells` : 'Cell'};
+  };
+
   // ── Jump to a task's row from anywhere (dashboard, modals) ──
   // Expands any collapsed ancestors (a hidden row can't be scrolled to),
   // switches to the task's project, and hands GridView a goToFocus token so it
@@ -4375,10 +4487,11 @@ function App() {
           }}
           deleteCount={(() => { const ids = fullRowSelIds(); return ids.length > 1 && ids.includes(taskCtx.task.id) ? ids.length : 1; })()}
           onSetHealth={hk => { updateTask(taskCtx.task.id, {health: hk}, taskCtx.projId); setTaskCtx(null); }}
-          onSetRowColor={color => { updateTask(taskCtx.task.id, {rowColor: color ?? null}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, rowColor: color ?? null}} : c); }}
-          onSetBold={v   => { updateTask(taskCtx.task.id, {bold: v},   taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, bold: v}}   : c); }}
-          onSetItalic={v => { updateTask(taskCtx.task.id, {italic: v}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, italic: v}} : c); }}
-          onClearFormat={() => { updateTask(taskCtx.task.id, {rowColor: null, bold: false, italic: false}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, rowColor: null, bold: false, italic: false}} : c); }}
+          fmt={ctxFmtState()}
+          onSetRowColor={color => applyFormatAndSync({fill: color ?? null})}
+          onSetBold={v   => applyFormatAndSync({bold: v})}
+          onSetItalic={v => applyFormatAndSync({italic: v})}
+          onClearFormat={() => applyFormatAndSync({}, {clearAll: true})}
           onClose={() => setTaskCtx(null)}
         />
       )}
@@ -4612,7 +4725,7 @@ function ProjContextMenu({x, y, projId, canDelete, onRename, onDuplicate, onDele
 }
 
 // ── TaskContextMenu ───────────────────────────────────────
-function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAddSubtask, onDuplicate, onCopyName, onCutTask, onCopyTaskFull, onPasteTask, hasClipboard, onIndent, onOutdent, onAddNote, onDelete, deleteCount = 1, onSetHealth, onSetRowColor, onSetBold, onSetItalic, onClearFormat, onClose}) {
+function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAddSubtask, onDuplicate, onCopyName, onCutTask, onCopyTaskFull, onPasteTask, hasClipboard, onIndent, onOutdent, onAddNote, onDelete, deleteCount = 1, onSetHealth, onSetRowColor, onSetBold, onSetItalic, onClearFormat, fmt, onClose}) {
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -4644,7 +4757,11 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
     </div>
   );
   const Sep = () => <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />;
-  const hasAnyFmt = !!task.rowColor || !!task.bold || !!task.italic;
+  // Scope-aware toolbar state: fb reflects the cell OR row being formatted
+  // (computed by App from the live selection); falls back to row flags.
+  const fb = fmt || {bold: !!task.bold, italic: !!task.italic, fill: task.rowColor || null,
+    hasAny: !!task.rowColor || !!task.bold || !!task.italic, scopeLabel: null};
+  const hasAnyFmt = fb.hasAny;
   const Header = () => (
     <div style={{padding:"5px 11px 4px",borderBottom:"1px solid var(--bd)",marginBottom:2}}>
       <div style={{fontSize:9,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",marginBottom:1}}>Task {task.id}</div>
@@ -4684,21 +4801,21 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
           strip beneath it (when set) — Excel's "last used color" affordance. The
           swatch grid appears immediately below, keeping all formatting in one block. */}
       <div style={{padding:"3px 6px",background:"#f7f8fa",borderBottom:"1px solid var(--bd)",display:"flex",alignItems:"center",gap:1}}>
-        <ExcelBtn active={!!task.bold}   onClick={()=>onSetBold(!task.bold)}     title="Bold">
+        <ExcelBtn active={!!fb.bold}   onClick={()=>onSetBold(!fb.bold)}     title="Bold">
           <span style={{fontWeight:800,fontSize:13,fontFamily:"'Inter',system-ui,sans-serif",lineHeight:1}}>B</span>
         </ExcelBtn>
-        <ExcelBtn active={!!task.italic} onClick={()=>onSetItalic(!task.italic)} title="Italic">
+        <ExcelBtn active={!!fb.italic} onClick={()=>onSetItalic(!fb.italic)} title="Italic">
           <span style={{fontStyle:"italic",fontWeight:600,fontSize:13,fontFamily:"Georgia,'Times New Roman',serif",lineHeight:1}}>I</span>
         </ExcelBtn>
         <span style={{width:1,height:16,background:"var(--bd2)",margin:"0 3px"}} />
-        {/* Fill-bucket button: icon over a colored strip showing current row color (Excel pattern) */}
-        <ExcelBtn active={!!task.rowColor} onClick={()=>{ /* visual only — swatch grid below is live */ }} title={task.rowColor ? `Fill: ${task.rowColor}` : "Fill color"}>
+        {/* Fill-bucket button: icon over a colored strip showing current fill (Excel pattern) */}
+        <ExcelBtn active={!!fb.fill} onClick={()=>{ /* visual only — swatch grid below is live */ }} title={fb.fill ? `Fill: ${fb.fill}` : "Fill color"}>
           <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1}}>
             <svg width="13" height="11" viewBox="0 0 24 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M3 11l8 8a2 2 0 0 0 2.8 0L22 10.5 12.5 1 4 9.5a2 2 0 0 0 0 2.8z" />
               <path d="M5 9h13" />
             </svg>
-            <div style={{width:14,height:3,background:task.rowColor||"transparent",border:task.rowColor?"none":"1px dashed #c0c8d0",borderRadius:1}} />
+            <div style={{width:14,height:3,background:fb.fill||"transparent",border:fb.fill?"none":"1px dashed #c0c8d0",borderRadius:1}} />
           </div>
         </ExcelBtn>
         <span style={{width:1,height:16,background:"var(--bd2)",margin:"0 3px"}} />
@@ -4711,6 +4828,8 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
           </svg>
         </ExcelBtn>
         <span style={{flex:1}} />
+        {/* Scope hint: tells the user whether formatting targets the cell or row(s) */}
+        {fb.scopeLabel && <span style={{fontSize:9,fontWeight:700,color:"var(--mut)",letterSpacing:".04em",textTransform:"uppercase",padding:"0 5px",userSelect:"none"}}>{fb.scopeLabel}</span>}
         <span style={{fontSize:9,color:"var(--mut)",fontFamily:"'Inter',system-ui,sans-serif",letterSpacing:".06em",textTransform:"uppercase",paddingRight:2}}>Format</span>
       </div>
       {/* Swatch grid — immediately below the toolbar, no separator (visually one block) */}
@@ -5469,6 +5588,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
               {orderedCols.map((c) => { const ci = COLS.indexOf(c);
                 const active = isFocused && selectedColIdx === ci && !hasRange;
                 const selected = inRange(ri, ci);
+                const cfmt = task.cellFmt?.[c.k]; // per-cell format (bold/italic/fill)
                 return (
                   <div key={c.k} style={{
                     width:colWidths[c.k], flexShrink:0,
@@ -5476,7 +5596,9 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                     height:ROW_H,
                     position:"relative",
                     zIndex: active ? 2 : "auto",
-                    background: (selected && hasRange) ? "#dbeafe" : "transparent",
+                    background: (selected && hasRange) ? "#dbeafe" : (cfmt?.fill || "transparent"),
+                    fontWeight: cfmt?.bold ? 700 : undefined,
+                    fontStyle: cfmt?.italic ? "italic" : undefined,
                     borderRight: (selected && hasRange) ? "1px solid #93c5fd" : "1px solid var(--bd)",
                     boxShadow: selShadow(ri, ci, selected, active),
                     userSelect: isDraggingCells.current ? "none" : "auto",
@@ -5548,6 +5670,12 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                     onClick={() => { setSelectedColIdx(ci); }}
                     onContextMenu={e => {
                       e.preventDefault(); e.stopPropagation();
+                      // Excel semantics: right-clicking INSIDE the current
+                      // selection keeps it (so the menu can act on the whole
+                      // thing — e.g. "Delete N Rows"); right-clicking OUTSIDE
+                      // collapses the selection to this cell so the previous
+                      // click's highlight never lingers alongside this one.
+                      if (!inRange(ri, ci)) setSelRange({r1:ri, r2:ri, c1:ci, c2:ci});
                       setSelectedId(task.id); setSelectedColIdx(ci);
                       if (setTaskCtx) setTaskCtx({task, projId: proj?.id, x: e.clientX, y: e.clientY});
                     }}
@@ -5882,6 +6010,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
         const seedVal = editStartChar != null ? editStartChar : toShortDate(task[col.k]);
         return (
           <input autoFocus className="ei" placeholder="M/D or M/D/YY"
+            style={{textAlign:"center", fontSize:11}}
             defaultValue={seedVal}
             onBlur={e => commit(task.id, col.k, e.target.value)}
             onKeyDown={e => {
@@ -5897,8 +6026,9 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
       if (col.k === "name") {
         const ls = [{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)];
         const seedVal = editStartChar != null ? editStartChar : (task.name ?? "");
-        const fw = task.bold ? 700 : ls.fontWeight;
-        const fs = task.italic ? "italic" : "normal";
+        const cf = task.cellFmt?.name;
+        const fw = (task.bold || cf?.bold) ? 700 : ls.fontWeight;
+        const fs = (task.italic || cf?.italic) ? "italic" : "normal";
         return (
           <input autoFocus className="ei"
             defaultValue={seedVal}
@@ -5931,6 +6061,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
       return (
         <input autoFocus className="ei"
           placeholder={col.k==="predecessors" ? "e.g. 2, 3SS, 4FF+2d" : undefined}
+          style={(col.k==="duration"||col.k==="percentComplete") ? {textAlign:"center", fontSize:11} : undefined}
           defaultValue={seedVal}
           onBlur={e => commit(task.id, col.k, e.target.value)}
           onKeyDown={e => {
@@ -5949,9 +6080,10 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
       // the number when a fill is set, tiny B/I letter badges right of it when those
       // toggles are on. Lets users scan the ID column to spot formatted rows without
       // opening the right-click menu.
-      const hasFmt = !!task.rowColor || !!task.bold || !!task.italic;
+      const hasCellFmt = !!(task.cellFmt && Object.keys(task.cellFmt).length);
+      const hasFmt = !!task.rowColor || !!task.bold || !!task.italic || hasCellFmt;
       const fmtSummary = hasFmt
-        ? `Formatted: ${[task.rowColor && "fill color", task.bold && "bold", task.italic && "italic"].filter(Boolean).join(", ")}`
+        ? `Formatted: ${[task.rowColor && "fill color", task.bold && "bold", task.italic && "italic", hasCellFmt && "cell formats"].filter(Boolean).join(", ")}`
         : "Click to select row";
       return (
         <span title={fmtSummary} style={{...s,...mono,color:"var(--mut)",fontSize:11,cursor:"pointer",userSelect:"none",display:"flex",alignItems:"center",gap:3,paddingLeft:s.paddingLeft||4}}>
@@ -5988,7 +6120,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
         ) : (
           <span style={{width:16,flexShrink:0,display:"inline-block"}} />
         )}
-        {(() => { const ls=[{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)]; const isEmpty = !task.name; const fw = task.bold ? 700 : ls.fontWeight; const fs = (task.italic || isEmpty) ? "italic" : "normal"; return (
+        {(() => { const ls=[{fontSize:13,fontWeight:600},{fontSize:12,fontWeight:500},{fontSize:11.5,fontWeight:400},{fontSize:11,fontWeight:400}][Math.min(task.level,3)]; const cf = task.cellFmt?.name; const isEmpty = !task.name; const fw = (task.bold || cf?.bold) ? 700 : ls.fontWeight; const fs = (task.italic || cf?.italic || isEmpty) ? "italic" : "normal"; return (
           <span style={{overflow:"hidden",textOverflow:"ellipsis",color:isEmpty?"var(--mut)":"#1f2328",fontStyle:fs,fontSize:ls.fontSize,fontWeight:fw,minWidth:0}}>
             {task.name || "New task"}
           </span>
@@ -6112,8 +6244,10 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
       return (
         <span style={{...s,gap:6,cursor:"pointer"}} onClick={e=>{e.stopPropagation();setNotesCtx({taskId:task.id,projectId:projId});}}>
 
-          <span style={{color:"var(--mut)",fontSize:11,overflow:"hidden",textOverflow:"ellipsis"}}>
-            {latest ? (() => { const [,m,d] = latest.date.split('-'); const pre = `${+m}/${+d} | `; const full = pre + latest.text; return full.slice(0,52)+(full.length>52?"…":""); })() : "+"}
+          {/* Full text fills the cell — CSS ellipsis trims at the real cell
+              edge, so widening the column reveals more (no hard char limit) */}
+          <span style={{color:"var(--mut)",fontSize:11,flex:1,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+            {latest ? (() => { const [,m,d] = latest.date.split('-'); return `${+m}/${+d} | ${latest.text}`; })() : "+"}
           </span>
         </span>
       );
@@ -7098,7 +7232,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
       case "name":
         return <td key={col.k} style={{...tdBase,cursor:"text"}} onClick={onCellClick} onDoubleClick={()=>setLocalEdit({id:t.id,projId:t.projId,col:"name"})}>
           {isE(t,"name")
-            ? <input autoFocus style={{width:"100%",height:"22px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? t.name}
+            ? <input autoFocus style={{display:"block",width:"100%",height:"18px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? t.name}
                 onBlur={e=>commit(t,"name",e.target.value)}
                 onKeyDown={e=>{if(e.key==="Enter")commit(t,"name",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
             : <span style={{color:"#1f2328",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",display:"block"}}>{t.name}</span>}
@@ -7111,7 +7245,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
         // Parent durations roll up from children — locked, same as the project grid.
         return <td key={col.k} style={{...tdBase,cursor:t.isLeaf?"text":"default"}} onClick={onCellClick} onDoubleClick={()=>{ if (!t.isLeaf) return; setLocalEdit({id:t.id,projId:t.projId,col:"duration"}); }}>
           {isE(t,"duration")
-            ? <input autoFocus style={{width:"100%",height:"22px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? t.duration} onBlur={e=>commit(t,"duration",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")commit(t,"duration",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
+            ? <input autoFocus style={{display:"block",width:"100%",height:"18px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? t.duration} onBlur={e=>commit(t,"duration",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")commit(t,"duration",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
             : <span style={{color:"var(--mut)"}}>{t.duration===""||t.duration==null?"0d":`${t.duration}d`}</span>}
         </td>;
       case "health":
@@ -7133,7 +7267,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
       case "percentComplete":
         return <td key={col.k} style={{...tdBase,cursor:"text"}} onClick={onCellClick} onDoubleClick={()=>setLocalEdit({id:t.id,projId:t.projId,col:"percentComplete"})}>
           {isE(t,"percentComplete")
-            ? <input autoFocus style={{width:"100%",height:"22px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? (t.percentComplete||0)} onBlur={e=>commit(t,"percentComplete",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")commit(t,"percentComplete",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
+            ? <input autoFocus style={{display:"block",width:"100%",height:"18px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? (t.percentComplete||0)} onBlur={e=>commit(t,"percentComplete",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")commit(t,"percentComplete",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
             : <span style={{color:"var(--mut)"}}>{t.percentComplete||0}%</span>}
         </td>;
       case "responsibleParty":
