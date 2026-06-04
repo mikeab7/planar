@@ -2693,6 +2693,7 @@ function App() {
   const [selectedId,    setSelectedId]    = useState(null);
   const [selRange,      setSelRange]      = useState(null); // {r1,r2,c1,c2} — row/col indices into flatTasks/COLS
   const [selectedColIdx, setSelectedColIdx] = useState(0);
+  const [goToFocus,      setGoToFocus]      = useState(null); // {taskId, n} — grid scrolls to + pulses this row after a cross-view jump
   const [settingsOpen,    setSettingsOpen]    = useState(false);
   const [automationOpen,  setAutomationOpen]  = useState(false);
   const [contactsOpen,    setContactsOpen]    = useState(false);
@@ -3260,6 +3261,34 @@ function App() {
         }
       }
     }
+  }, []);
+
+  // ── Jump to a task's row from anywhere (dashboard, modals) ──
+  // Expands any collapsed ancestors (a hidden row can't be scrolled to),
+  // switches to the task's project, and hands GridView a goToFocus token so it
+  // scrolls the row into a comfortable position and pulses it on landing.
+  // Gantt-only view flips to split, since there's no grid row to land on.
+  const goToTask = useCallback((pid, taskId) => {
+    setData(d => {
+      const proj = d.projects[pid];
+      if (!proj) return d;
+      const byId = {};
+      proj.tasks.forEach(t => { byId[t.id] = t; });
+      const toExpand = new Set();
+      let p = byId[taskId]?.parentId;
+      while (p != null && byId[p]) { toExpand.add(p); p = byId[p].parentId; }
+      const needsExpand = [...toExpand].some(id => !byId[id].isExpanded);
+      const tasks = needsExpand
+        ? proj.tasks.map(t => toExpand.has(t.id) && !t.isExpanded ? {...t, isExpanded: true} : t)
+        : proj.tasks;
+      return {...d, section: 'projects', aPid: pid,
+        view: d.view === 'gantt' ? 'split' : d.view,
+        projects: {...d.projects, [pid]: {...proj, tasks}}};
+    });
+    setSelectedId(taskId);
+    setSelectedColIdx(0);
+    setSelRange(null);
+    setGoToFocus({taskId, n: Date.now()}); // fresh token each jump, even to the same row
   }, []);
 
   const addTask = useCallback(() => {
@@ -3893,7 +3922,7 @@ function App() {
   );
 
   const setHoverZone = zone => { hoverZoneRef.current = zone; };
-  const shared = {tasks: flatTasks, succMap, updateTask, deleteTask, getTaskName, proj, setData, setNotesCtx, edit, setEdit, editStartChar, selectedId, setSelectedId, selRange, setSelRange, selectedColIdx, setSelectedColIdx, ganttPPD, setGanttPPD, gridZoom, setHoverZone, insertTask, insertTaskBelow, addTask, addSubtask, duplicateTask, indentTaskById, outdentTaskById, setTaskCtx, rolledHealthMap, healthColStyle: data.healthColStyle || "stoplight", setHealthColStyle: v => setData(d => ({...d, healthColStyle: v})), data};
+  const shared = {tasks: flatTasks, succMap, updateTask, deleteTask, getTaskName, proj, setData, setNotesCtx, edit, setEdit, editStartChar, selectedId, setSelectedId, selRange, setSelRange, selectedColIdx, setSelectedColIdx, goToFocus, ganttPPD, setGanttPPD, gridZoom, setHoverZone, insertTask, insertTaskBelow, addTask, addSubtask, duplicateTask, indentTaskById, outdentTaskById, setTaskCtx, rolledHealthMap, healthColStyle: data.healthColStyle || "stoplight", setHealthColStyle: v => setData(d => ({...d, healthColStyle: v})), data};
 
   let section = data.section ?? "projects";
   if (section === "suggestions") section = "projects";   // Suggestions tab removed — Review now lives inside Projects
@@ -4179,7 +4208,7 @@ function App() {
       {automationOpen  && <AutomationPanel  data={data} setData={setData} onClose={()=>setAutomationOpen(false)} />}
       {contactsOpen    && <ContactsPanel    data={data} setData={setData} onClose={()=>setContactsOpen(false)} />}
       {historyOpen     && <HistoryPanel     data={data} setData={setData} onClose={()=>setHistoryOpen(false)} />}
-      {successorPrompt && <SuccessorPromptModal prompt={successorPrompt} updateTask={updateTask} onClose={()=>setSuccessorPrompt(null)} onOpenTask={(pid, taskId)=>{ setData(d=>({...d, section:'projects', aPid:pid})); setSelectedId(taskId); setSuccessorPrompt(null); }} />}
+      {successorPrompt && <SuccessorPromptModal prompt={successorPrompt} updateTask={updateTask} onClose={()=>setSuccessorPrompt(null)} onOpenTask={(pid, taskId)=>{ goToTask(pid, taskId); setSuccessorPrompt(null); }} />}
 
       {/* BODY */}
       <div style={{flex:1,overflow:"hidden",display:"flex"}}>
@@ -4187,7 +4216,7 @@ function App() {
         {section === "projects" && !reviewOpen && data.view==="grid"  && <GridView   {...shared} />}
         {section === "projects" && !reviewOpen && data.view==="gantt" && <GanttView  tasks={flatTasks} updateTask={updateTask} pxPerDay={ganttPPD} onZoomChange={setGanttPPD} rolledHealthMap={rolledHealthMap} proj={proj} onMouseEnter={()=>setHoverZone('gantt')} selectedId={selectedId} setSelectedId={setSelectedId} settings={data.settings} />}
         {section === "projects" && !reviewOpen && data.view==="split" && <SplitView  {...shared} />}
-        {section === "reports"                         && <MasterView data={data} setData={setData} updateTask={updateTask} setNotesCtx={setNotesCtx} />}
+        {section === "reports"                         && <MasterView data={data} setData={setData} updateTask={updateTask} setNotesCtx={setNotesCtx} goToTask={goToTask} />}
         {section === "projects" && reviewOpen           && <SuggestionsView data={data} updateTask={updateTask} setData={setData} rows={reviewRows} setRows={setReviewRows} loading={reviewLoading} onClose={()=>setReviewOpen(false)} gridProps={shared} activeIdx={reviewIdx} setActiveIdx={setReviewIdx} />}
         </ErrorBoundary>
       </div>
@@ -4969,7 +4998,7 @@ function NotesColHeader({data, setData}) {
   );
 }
 
-function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, setData, setNotesCtx, edit, setEdit, editStartChar, selectedId, setSelectedId, selRange, setSelRange, selectedColIdx, setSelectedColIdx, scrollRef, onScroll, setTaskCtx, insertTask, insertTaskBelow, addTask, addSubtask, duplicateTask, indentTaskById, outdentTaskById, rolledHealthMap, healthColStyle, setHealthColStyle, data, gridZoom=1, setHoverZone, onColWidths, review}) {
+function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, setData, setNotesCtx, edit, setEdit, editStartChar, selectedId, setSelectedId, selRange, setSelRange, selectedColIdx, setSelectedColIdx, goToFocus, scrollRef, onScroll, setTaskCtx, insertTask, insertTaskBelow, addTask, addSubtask, duplicateTask, indentTaskById, outdentTaskById, rolledHealthMap, healthColStyle, setHealthColStyle, data, gridZoom=1, setHoverZone, onColWidths, review}) {
   const [scrollTop, setScrollTop] = useState(0);
   const localRef = useRef(null);
   const ref = scrollRef || localRef;
@@ -5047,6 +5076,33 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
     const id = setTimeout(() => { el.scrollTop = Math.max(0, idx * ROW_H - Math.min(120, el.clientHeight / 3)); }, 50);
     return () => clearTimeout(id);
   }, [rvAnchorId]);
+
+  // ── Cross-view jump landing ───────────────────────────────
+  // When App hands us a goToFocus token (dashboard ↗, successor-prompt open),
+  // place the row about a third down the viewport — not pinned to an edge the
+  // way the plain selection-keeper does — then pulse its outline so the eye
+  // lands on it. The 60ms delay lets the section/project switch paint first.
+  useEffect(() => {
+    if (!goToFocus) return;
+    const el = ref.current; if (!el) return;
+    const idx = tasks.findIndex(t => t.id === goToFocus.taskId);
+    if (idx < 0) return;
+    const id = setTimeout(() => {
+      el.scrollTop = Math.max(0, idx * ROW_H - Math.min(120, el.clientHeight / 3));
+      // The row may not exist in the DOM until the virtualizer re-renders for
+      // the new scrollTop — give React a beat before looking it up.
+      setTimeout(() => {
+        const rowEl = el.querySelector(`[data-task-row="${goToFocus.taskId}"]`);
+        if (rowEl && rowEl.animate) rowEl.animate(
+          [{boxShadow:"inset 0 0 0 2px #2563eb", offset:0},
+           {boxShadow:"inset 0 0 0 2px #2563eb", offset:.45},
+           {boxShadow:"inset 0 0 0 2px rgba(37,99,235,0)"}],
+          {duration:1100, easing:"ease-out"}
+        );
+      }, 120);
+    }, 60);
+    return () => clearTimeout(id);
+  }, [goToFocus]);
 
   const handleScroll = e => { setScrollTop(e.currentTarget.scrollTop); if (onScroll) onScroll(e); };
 
@@ -5275,7 +5331,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
             : computeDisplayHealth(task, data.settings);
           const isExpandedParent = task.hasChildren && task.isExpanded;
           return (
-            <div key={task.id} className="drow"
+            <div key={task.id} className="drow" data-task-row={task.id}
               style={{top:ri*ROW_H, height:ROW_H,
                 borderLeft: isFocused ? "2px solid var(--blue)" : (task.__rvTarget ? "2px solid var(--amber)" : "2px solid transparent"),
                 background: task.__rvMover ? "#fff8ee" : task.__rvTarget ? "#f3f0ff" : (task.rowColor || (isExpandedParent ? (ri%2?"#f8fafc":"var(--bg)") : (displayHealth==="red"?"#ffdfdf":displayHealth==="yellow"?"#fff7b9":displayHealth==="green"?"#d6fae2":displayHealth==="paused"?"#f3f4f6":ri%2?"#f8fafc":"var(--bg)")))}}>
@@ -6599,7 +6655,7 @@ const DEFAULT_MASTER_WIDTHS = {
   predecessors:180, successors:180, notes:80,
 };
 
-function MasterView({data, setData, updateTask, setNotesCtx}) {
+function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
   const [localEdit, setLocalEdit] = useState(null);
   const [selCell, setSelCell] = useState(null); // {ri, ci}
   const tableWrapRef = useRef(null);
@@ -6808,6 +6864,30 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
   const activeCols = visCols.map(k => MASTER_COL_DEFS.find(c => c.k === k)).filter(Boolean);
   // When grouped by project, hide the project column — it's redundant with the group header
   const displayCols = masterGroupBy === "project" ? activeCols.filter(c => c.k !== "project") : activeCols;
+
+  // ── Jump column ("↗ open in project") ─────────────────────
+  // Fixed 30px leading column, outside the configurable masterCols system:
+  // not sortable, not draggable, not resizable, always visible (touch-friendly
+  // on mobile — no hover required). Clicking navigates to the task's exact row
+  // in the project grid via goToTask, which expands ancestors and scrolls.
+  const renderJumpCell = (t) => (
+    <td key="__jump" style={{width:30,minWidth:30,maxWidth:30,padding:0,textAlign:"center",
+      borderBottom:"1px solid var(--bd)",borderRight:"1px solid var(--bd)"}}>
+      <button title={`Open row in ${t.projName}`}
+        onClick={e => { e.stopPropagation(); if (goToTask) goToTask(t.projId, t.id); }}
+        onMouseEnter={e => { e.currentTarget.style.color = "var(--blue)"; e.currentTarget.style.background = "rgba(9,105,218,0.08)"; }}
+        onMouseLeave={e => { e.currentTarget.style.color = "var(--mut)";  e.currentTarget.style.background = "transparent"; }}
+        style={{width:20,height:20,padding:0,border:"none",borderRadius:4,background:"transparent",
+          color:"var(--mut)",cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",
+          verticalAlign:"middle",transition:"color .12s, background .12s"}}>
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5 2 H2.5 A.5 .5 0 0 0 2 2.5 V9.5 A.5 .5 0 0 0 2.5 10 H9.5 A.5 .5 0 0 0 10 9.5 V7" />
+          <path d="M7.2 2 H10 V4.8" />
+          <path d="M10 2 L5.8 6.2" />
+        </svg>
+      </button>
+    </td>
+  );
   const EDITABLE_KEYS = new Set(["name","duration","health","percentComplete","responsibleParty","notes"]);
 
   const handleTableKey = e => {
@@ -7136,9 +7216,11 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
       <div ref={tableWrapRef} style={{overflowX:"auto",outline:"none"}} tabIndex={0} onKeyDown={handleTableKey}
         onBlur={e=>{ if (!e.currentTarget.contains(e.relatedTarget)) setSelCell(null); }}>
       <table style={{borderCollapse:"collapse",tableLayout:"fixed",
-        width:activeCols.reduce((s,c)=>s+(colWidths[c.k]||100),0),fontSize:12}}>
+        width:30 + activeCols.reduce((s,c)=>s+(colWidths[c.k]||100),0),fontSize:12}}>
         <thead>
           <tr>
+            <th key="__jump" style={{width:30,minWidth:30,maxWidth:30,padding:0,
+              borderBottom:"1px solid var(--bd2)",borderRight:"1px solid var(--bd)",background:"transparent"}} />
             {displayCols.map(col => {
               const isActive = masterSort.col === col.k;
               const sortable = ["project","id","name","start","end","duration","health","percentComplete","responsibleParty","notes"].includes(col.k);
@@ -7187,7 +7269,7 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
             sortedRows.forEach(t => { (groups[t.projName] = groups[t.projName]||[]).push(t); });
             return Object.entries(groups).flatMap(([projName, gRows]) => [
               <tr key={`grp-${projName}`}>
-                <td colSpan={displayCols.length} style={{
+                <td colSpan={displayCols.length + 1} style={{
                   padding:"10px 12px 8px", borderBottom:"1px solid var(--bd)",
                   background:"#f0f0f5", borderLeft:"4px solid var(--amber)"}}>
                   <span style={{fontSize:15,fontWeight:700,color:"var(--txt)",letterSpacing:"-.01em"}}>{projName}</span>
@@ -7198,6 +7280,7 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
                 const ri = sortedRows.indexOf(t);
                 return (
                 <tr key={`${t.projId}-${t.id}`} style={{background:t.rowColor||(gri%2?"#f8fafc":"var(--bg)")}}>
+                  {renderJumpCell(t)}
                   {displayCols.map(col => renderCell(t, col, ri))}
                 </tr>
                 );
@@ -7206,11 +7289,12 @@ function MasterView({data, setData, updateTask, setNotesCtx}) {
           })()
           : sortedRows.map((t, ri) => (
             <tr key={`${t.projId}-${t.id}`} style={{background:t.rowColor||(ri%2?"#f8fafc":"var(--bg)")}}>
+              {renderJumpCell(t)}
               {displayCols.map(col => renderCell(t, col, ri))}
             </tr>
           ))}
           {rows.length===0 && (
-            <tr><td colSpan={displayCols.length} style={{padding:40,textAlign:"center",color:"var(--mut)",fontSize:12,borderBottom:"1px solid var(--bd)"}}>
+            <tr><td colSpan={displayCols.length + 1} style={{padding:40,textAlign:"center",color:"var(--mut)",fontSize:12,borderBottom:"1px solid var(--bd)"}}>
               {filteredRows.length===0&&rows.length>0?"No tasks match the current filter.":"No tasks in this project yet."}
             </td></tr>
           )}
