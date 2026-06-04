@@ -691,7 +691,9 @@ const defaultStartFor = (tasks, parentId, excludeId = null) => {
 const mkt = (id, name, start, dur, parentId=null, health="gray", predecessors=[]) => {
   const isBlank = !start && (dur === "" || dur === null || dur === undefined);
   const safeStart = isBlank ? "" : ((start && !isNaN(new Date(start).getTime())) ? start : NOW);
-  const safeDur   = isBlank ? "" : dur;
+  // Blank tasks are born at 0d (renders "0d", never a bare "d"); dates stay
+  // empty until the user types one — calcEnd("", 0) is "" by design.
+  const safeDur   = isBlank ? 0 : dur;
   return {
     id, name, start: safeStart, end: calcEnd(safeStart, safeDur), duration: safeDur, predecessors, health,
     percentComplete: health==="green" ? 100 : health==="yellow" ? 40 : 0,
@@ -962,6 +964,7 @@ const TOTAL_W = COLS.reduce((s,c) => s+c.w, 0);
 function celebrateTaskComplete(taskName) {
   try {
     document.getElementById("planar-celebrate-toast")?.remove();
+    document.getElementById("planar-delete-toast")?.remove(); // same anchor spot — never stack
     const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const toast = document.createElement("div");
@@ -1059,6 +1062,65 @@ function celebrateTaskComplete(taskName) {
     }
     setTimeout(() => exit(240), LIFE);
   } catch (e) { /* celebration is decorative — never let it break a real update */ }
+}
+
+// ── Row-deletion toast ────────────────────────────────────
+// Confirmation that rows were removed, in the same bottom-center style as the
+// completion toast. Shows how many rows went (and, when parents were swept,
+// how many tasks total including subtasks) plus a Ctrl+Z reminder — deletes
+// flow through setData, so the existing undo history restores them fully.
+function notifyRowsDeleted(rowCount, totalCount) {
+  try {
+    document.getElementById("planar-delete-toast")?.remove();
+    document.getElementById("planar-celebrate-toast")?.remove(); // same anchor spot — never stack
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const toast = document.createElement("div");
+    toast.id = "planar-delete-toast";
+    toast.style.cssText = "position:fixed;left:50%;bottom:calc(26px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);z-index:100002;pointer-events:none;";
+    const card = document.createElement("div");
+    card.style.cssText = "display:flex;align-items:center;gap:11px;background:#fff;border:1px solid #d0d7de;border-radius:10px;padding:10px 16px 10px 13px;box-shadow:0 6px 24px rgba(27,31,36,.16),0 1px 3px rgba(27,31,36,.08);font-family:'Inter',system-ui,-apple-system,sans-serif;";
+    toast.appendChild(card);
+
+    const dot = document.createElement("span");
+    dot.style.cssText = "width:20px;height:20px;border-radius:50%;background:#dc2626;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;";
+    dot.innerHTML = '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3.4 H10"/><path d="M4.6 3.4 V2.4 A.7 .7 0 0 1 5.3 1.7 H6.7 A.7 .7 0 0 1 7.4 2.4 V3.4"/><path d="M3.1 3.4 L3.7 9.9 A.8 .8 0 0 0 4.5 10.6 H7.5 A.8 .8 0 0 0 8.3 9.9 L8.9 3.4"/><path d="M5.1 5.4 V8.6 M6.9 5.4 V8.6"/></svg>';
+    card.appendChild(dot);
+
+    const text = document.createElement("span");
+    const nameEl = document.createElement("div");
+    nameEl.style.cssText = "font-size:12.5px;font-weight:600;color:#1f2328;line-height:1.35;";
+    nameEl.textContent = rowCount === 1 ? "1 row deleted" : `${rowCount} rows deleted`;
+    const subEl = document.createElement("div");
+    subEl.style.cssText = "font-size:11px;font-weight:500;color:#57606a;line-height:1.35;";
+    subEl.textContent = (totalCount > rowCount ? `${totalCount} tasks removed including subtasks · ` : "") + "Ctrl+Z to undo";
+    text.appendChild(nameEl); text.appendChild(subEl);
+    card.appendChild(text);
+
+    document.body.appendChild(toast);
+
+    const LIFE = 2600; // a touch longer than the celebration — it carries the undo hint
+    const exit = (dur) => {
+      toast.animate(
+        [{transform:"translateX(-50%) translateY(0)", opacity:1},
+         {transform:"translateX(-50%) translateY(10px)", opacity:0}],
+        {duration:dur, easing:"cubic-bezier(.4,0,1,1)", fill:"forwards"}
+      );
+      setTimeout(() => toast.remove(), dur + 30);
+    };
+    if (reduce) {
+      toast.animate([{opacity:0},{opacity:1}], {duration:150, fill:"forwards"});
+      setTimeout(() => exit(200), LIFE);
+      return;
+    }
+    toast.animate(
+      [{transform:"translateX(-50%) translateY(16px)", opacity:0},
+       {transform:"translateX(-50%) translateY(-2px)", opacity:1, offset:.7},
+       {transform:"translateX(-50%) translateY(0)",    opacity:1}],
+      {duration:280, easing:"cubic-bezier(.22,1,.36,1)", fill:"forwards"}
+    );
+    setTimeout(() => exit(240), LIFE);
+  } catch (e) { /* informational — never let the toast block a delete */ }
 }
 
 // ── Successor Prompt ──────────────────────────────────────
@@ -2808,7 +2870,11 @@ function App() {
         if (!d?.projects) return d;
         const projects = {};
         Object.entries(d.projects).forEach(([pid, proj]) => {
-          projects[pid] = {...proj, tasks: renumberTasks(sortByVisualOrder(proj.tasks))};
+          // Blank durations ("") become 0 on load — new tasks now start at 0d,
+          // and this sweeps any legacy empty values so the grid never shows a
+          // bare "d" again. Runs automatically, same as ID renumbering.
+          const tasks = (proj.tasks || []).map(t => (t.duration === "" || t.duration == null) ? {...t, duration: 0} : t);
+          projects[pid] = {...proj, tasks: renumberTasks(sortByVisualOrder(tasks))};
         });
         return {...d, projects};
       };
@@ -2937,7 +3003,11 @@ function App() {
             Math.min(selRange.c1, selRange.c2) === 0 &&
             Math.max(selRange.c1, selRange.c2) === COLS.length - 1;
           if (isFullRow) {
-            deleteTask(selectedId); setSelectedId(null); setSelRange(null);
+            // Delete every row in the selected span (ID-column drag /
+            // shift-click), each with its subtasks — not just the focused row.
+            const ids = fullRowSelIds();
+            deleteTasks(ids.length ? ids : [selectedId]);
+            setSelectedId(null); setSelRange(null);
             return;
           }
           // Fix #7: Delete on a single cell clears its value (Excel-style)
@@ -3262,6 +3332,43 @@ function App() {
       }
     }
   }, []);
+
+  // ── Multi-row delete ──────────────────────────────────────
+  // Deletes several tasks (plus all their subtasks) in one pass — used by the
+  // Delete key and the right-click menu when a full-row selection spans
+  // multiple rows. Same pipeline as single delete (renumberTasks remaps ids
+  // and drops dangling predecessor refs), so behavior matches exactly.
+  // Selecting a parent together with its children is fine — the Set makes the
+  // sweep idempotent. Shows a confirmation toast; Ctrl+Z restores everything.
+  const deleteTasks = useCallback((taskIds) => {
+    if (!taskIds || taskIds.length === 0) return;
+    const pid = dataRef.current?.aPid;
+    const all = dataRef.current?.projects?.[pid]?.tasks || [];
+    const del = new Set();
+    const mark = id => { del.add(id); all.filter(t => t.parentId === id).forEach(t => mark(t.id)); };
+    taskIds.forEach(mark);
+    const rowCount = taskIds.length, totalCount = del.size;
+    setData(d => {
+      const proj = d.projects[d.aPid];
+      if (!proj) return d;
+      return {...d, projects: {...d.projects, [d.aPid]: {...proj, tasks: renumberTasks(proj.tasks.filter(t => !del.has(t.id)))}}};
+    });
+    notifyRowsDeleted(rowCount, totalCount);
+  }, []);
+
+  // Ids of every task in the current FULL-ROW selection (made by ID-column
+  // click / drag / shift-click — the range spans all columns). Returns an
+  // empty array when the selection isn't full-row, so callers fall back to
+  // single-task behavior.
+  const fullRowSelIds = () => {
+    if (!selRange) return [];
+    if (Math.min(selRange.c1, selRange.c2) !== 0 || Math.max(selRange.c1, selRange.c2) !== COLS.length - 1) return [];
+    const ft = flatTasksRef.current || [];
+    const r1 = Math.max(0, Math.min(selRange.r1, selRange.r2));
+    const r2 = Math.min(ft.length - 1, Math.max(selRange.r1, selRange.r2));
+    if (r2 < r1) return [];
+    return ft.slice(r1, r2 + 1).map(t => t.id);
+  };
 
   // ── Jump to a task's row from anywhere (dashboard, modals) ──
   // Expands any collapsed ancestors (a hidden row can't be scrolled to),
@@ -4245,7 +4352,13 @@ function App() {
           onIndent={() => { indentTaskById(taskCtx.task.id); setTaskCtx(null); }}
           onOutdent={() => { outdentTaskById(taskCtx.task.id); setTaskCtx(null); }}
           onAddNote={() => { setNotesCtx({taskId: taskCtx.task.id, projectId: taskCtx.projId}); setTaskCtx(null); }}
-          onDelete={() => { deleteTask(taskCtx.task.id); setTaskCtx(null); }}
+          onDelete={() => {
+            // Right-click inside a multi-row selection deletes the whole selection
+            const ids = fullRowSelIds();
+            deleteTasks(ids.length > 1 && ids.includes(taskCtx.task.id) ? ids : [taskCtx.task.id]);
+            setSelectedId(null); setSelRange(null); setTaskCtx(null);
+          }}
+          deleteCount={(() => { const ids = fullRowSelIds(); return ids.length > 1 && ids.includes(taskCtx.task.id) ? ids.length : 1; })()}
           onSetHealth={hk => { updateTask(taskCtx.task.id, {health: hk}, taskCtx.projId); setTaskCtx(null); }}
           onSetRowColor={color => { updateTask(taskCtx.task.id, {rowColor: color ?? null}, taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, rowColor: color ?? null}} : c); }}
           onSetBold={v   => { updateTask(taskCtx.task.id, {bold: v},   taskCtx.projId); setTaskCtx(c => c ? {...c, task: {...c.task, bold: v}}   : c); }}
@@ -4484,7 +4597,7 @@ function ProjContextMenu({x, y, projId, canDelete, onRename, onDuplicate, onDele
 }
 
 // ── TaskContextMenu ───────────────────────────────────────
-function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAddSubtask, onDuplicate, onCopyName, onCutTask, onCopyTaskFull, onPasteTask, hasClipboard, onIndent, onOutdent, onAddNote, onDelete, onSetHealth, onSetRowColor, onSetBold, onSetItalic, onClearFormat, onClose}) {
+function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAddSubtask, onDuplicate, onCopyName, onCutTask, onCopyTaskFull, onPasteTask, hasClipboard, onIndent, onOutdent, onAddNote, onDelete, deleteCount = 1, onSetHealth, onSetRowColor, onSetBold, onSetItalic, onClearFormat, onClose}) {
   const menuRef = useRef(null);
 
   useEffect(() => {
@@ -4620,7 +4733,7 @@ function TaskContextMenu({x, y, task, projId, onInsertAbove, onInsertBelow, onAd
       <Sep />
       <Item icon="ti-message-circle"    label="Add Note"                      onClick={onAddNote} />
       <Sep />
-      <Item icon="ti-trash"             label="Delete Row"        danger       onClick={onDelete} />
+      <Item icon="ti-trash"             label={deleteCount > 1 ? `Delete ${deleteCount} Rows` : "Delete Row"} danger onClick={onDelete} />
     </div>,
     document.body
   );
@@ -5208,7 +5321,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
       switch(colKey) {
         case 'name': val = t.name||''; break;
         case 'start': case 'end': { const [y,m,d]=(t[colKey]||'').split('-'); val=`${String(+m).padStart(2,'0')}/${String(+d).padStart(2,'0')}/${(y||'').slice(2)}`; break; }
-        case 'duration': val = t.duration===0?'—':`${t.duration}d`; break;
+        case 'duration': val = `${t.duration}d`; break;
         case 'health': val = HEALTH[t.health]?.label||''; break;
         case 'percentComplete': val = `${t.percentComplete||0}%`; break;
         case 'responsibleParty': val = t.responsibleParty||''; break;
@@ -6659,6 +6772,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
   const [localEdit, setLocalEdit] = useState(null);
   const [selCell, setSelCell] = useState(null); // {ri, ci}
   const tableWrapRef = useRef(null);
+  const cellFocusTimer = useRef(null); // pending wrapper-focus queued by a single click — skipped/replaced on multi-clicks
   const [colPickerOpen, setColPickerOpen] = useState(false);
   const [lvlOpen, setLvlOpen] = useState(false);
 
@@ -6842,7 +6956,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
         case 'name': val = t.name||''; break;
         case 'start': val = fmtD(t.start); break;
         case 'end': val = fmtD(t.end); break;
-        case 'duration': val = t.duration===0?'—':`${t.duration}d`; break;
+        case 'duration': val = `${t.duration}d`; break;
         case 'health': val = HEALTH[t.health]?.label||''; break;
         case 'percentComplete': val = `${t.percentComplete||0}%`; break;
         case 'responsibleParty': val = t.responsibleParty||''; break;
@@ -6915,6 +7029,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
       if (col && t && EDITABLE_KEYS.has(col.k)) {
         e.preventDefault();
         if (col.k === 'notes') { setNotesCtx({taskId:t.id, projectId:t.projId, initChar:null}); return; }
+        if (col.k === 'duration' && !t.isLeaf) return; // parent durations roll up — locked like the project grid
         setLocalEdit({id: t.id, projId: t.projId, col: col.k});
       }
       return;
@@ -6928,6 +7043,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
       if (col.k === 'notes') { e.preventDefault(); setNotesCtx({taskId:t.id, projectId:t.projId, initChar:e.key}); return; }
       const isNum = col.k === 'duration' || col.k === 'percentComplete';
       if (isNum && !/\d/.test(e.key)) return;
+      if (col.k === 'duration' && !t.isLeaf) return; // parent durations roll up — locked like the project grid
       e.preventDefault();
       setLocalEdit({id: t.id, projId: t.projId, col: col.k, initChar: e.key});
     }
@@ -6939,7 +7055,17 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
     const ci = activeCols.indexOf(col);
     const isSel = selCell && selCell.ri === ri && selCell.ci === ci;
     const selStyle = isSel ? {outline:"2px solid #2563eb",outlineOffset:"-2px"} : {};
-    const onCellClick = () => { setSelCell({ri, ci}); setTimeout(()=>tableWrapRef.current?.focus({preventScroll:true}),0); };
+    // Single click selects the cell, then bounces focus back to the wrapper so
+    // arrow-key nav works. Double-click mounts an autoFocus editor input — so
+    // on the 2nd click of a multi-click (e.detail > 1) we must NOT queue the
+    // wrapper-focus: it would fire right after the editor mounts, blur the
+    // input, and its onBlur → commit would close the edit "after a millisecond".
+    const onCellClick = (e) => {
+      setSelCell({ri, ci});
+      if (e && e.detail > 1) return;
+      clearTimeout(cellFocusTimer.current);
+      cellFocusTimer.current = setTimeout(()=>tableWrapRef.current?.focus({preventScroll:true}),0);
+    };
     const isFirstCol = displayCols[0] === col;
     const stripeColor = h.dot === "#ffffff" ? "#d1d5db" : h.dot;
     const tdBase = {padding:"6px 10px", borderBottom:"1px solid var(--bd)", borderRight:"1px solid var(--bd)",
@@ -6966,10 +7092,11 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
       case "end":
         return <td key={col.k} onClick={onCellClick} style={{...tdBase,fontSize:11,color:"var(--mut)"}}>{fmtDate(t.end)}</td>;
       case "duration":
-        return <td key={col.k} style={{...tdBase,cursor:"text"}} onClick={onCellClick} onDoubleClick={()=>setLocalEdit({id:t.id,projId:t.projId,col:"duration"})}>
+        // Parent durations roll up from children — locked, same as the project grid.
+        return <td key={col.k} style={{...tdBase,cursor:t.isLeaf?"text":"default"}} onClick={onCellClick} onDoubleClick={()=>{ if (!t.isLeaf) return; setLocalEdit({id:t.id,projId:t.projId,col:"duration"}); }}>
           {isE(t,"duration")
             ? <input autoFocus style={{width:"100%",height:"22px",border:"none",borderBottom:"1.5px solid var(--blue)",outline:"none",background:"transparent",fontSize:12,fontFamily:"inherit",color:"var(--txt)",padding:"0 2px"}} defaultValue={localEdit?.initChar ?? t.duration} onBlur={e=>commit(t,"duration",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")commit(t,"duration",e.target.value);if(e.key==="Escape")setLocalEdit(null);}} />
-            : <span style={{color:"var(--mut)"}}>{t.duration===""||t.duration==null?"":t.duration===0?"—":`${t.duration}d`}</span>}
+            : <span style={{color:"var(--mut)"}}>{t.duration===""||t.duration==null?"0d":`${t.duration}d`}</span>}
         </td>;
       case "health":
         return <td key={col.k} data-hmenu="1" onClick={onCellClick}
@@ -7393,7 +7520,7 @@ function buildPDFHtml(cfg, data, forPreview) {
   const cellVal = (t,k,tasks) => {
     switch(k){
       case "start": case "end": return fmtD(t[k]);
-      case "duration": return t.duration===0?"—":`${t.duration}d`;
+      case "duration": return `${t.duration}d`;
       case "percentComplete": return `${t.percentComplete||0}%`;
       case "predecessors": return (t.predecessors||[]).map(p=>p.id||p).join(", ");
       case "health":{const h=HC[t.health]||{l:t.health,c:"#94a3b8"};return `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${h.c};flex-shrink:0;display:inline-block"></span>${escapeHtml(h.l)}</span>`;}
