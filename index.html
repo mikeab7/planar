@@ -284,6 +284,8 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color
   /* Row 2 — only renders in Projects mode */
   .app-header > .hdr-project { grid-column: 1; grid-row: 2; justify-self: start; margin-left: 0 !important; }
   .app-header > .hdr-view { grid-column: 2; grid-row: 2; margin-left: 0 !important; }
+  /* Review toggle — explicit placement; un-placed grid items stretch to fill their cell */
+  .app-header > .hdr-review { grid-column: 3; grid-row: 2; justify-self: end; margin-left: 0 !important; }
   /* Hide the flex spacer — irrelevant in grid */
   .app-header > div[style*="flex:1"] { display: none !important; }
   /* Hide divider line inside project picker wrap on mobile (no longer needed) */
@@ -2990,12 +2992,19 @@ function App() {
           const writable = await fileHandleRef.current.createWritable();
           await writable.write(html);
           await writable.close();
-          setSavePulse(true);
-          setTimeout(() => setSavePulse(false), 1400);
         } catch(e) { console.warn('Auto-save failed:', e); }
       }, 700);
     }
   }, [data]);
+
+  // Green save pulse — fires only when Supabase confirms the write, so gray
+  // means "not yet confirmed" rather than "feature not set up"
+  useEffect(() => {
+    let t;
+    const onSaved = () => { setSavePulse(true); clearTimeout(t); t = setTimeout(() => setSavePulse(false), 1500); };
+    window.addEventListener("planar:cloud-saved", onSaved);
+    return () => { window.removeEventListener("planar:cloud-saved", onSaved); clearTimeout(t); };
+  }, []);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -4229,6 +4238,7 @@ function App() {
               }
               setReviewOpen(opening);
             }} title="Review suggested updates from forwarded emails"
+            className="hdr-review"
             style={{marginLeft:10,flexShrink:0,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,
               letterSpacing:".01em",display:"flex",alignItems:"center",gap:7,padding:"5px 13px",borderRadius:7,transition:"all .15s",
               border: reviewOpen ? "1px solid var(--amber)" : "1px solid var(--bd2)",
@@ -4269,8 +4279,8 @@ function App() {
                     <span style={{width:9,height:9,borderRadius:"50%",flexShrink:0,
                       background:fileLinked?"#16a34a":"var(--bd2)"}} />
                     <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>{fileLinked?"Auto-Save On":"Enable Auto-Save"}</span>
-                      <span style={{fontSize:10,color:"var(--mut)"}}>{fileLinked?"Saving to linked file":"Link this file for auto-save"}</span>
+                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>{fileLinked?"Backup File Linked":"Link Backup File"}</span>
+                      <span style={{fontSize:10,color:"var(--mut)"}}>{fileLinked?"Cloud + local file":"Cloud auto-save is always on"}</span>
                     </div>
                   </div>
                   {/* Download options */}
@@ -4355,11 +4365,6 @@ function App() {
                   <span style={{fontSize:10,color:"var(--mut)"}}>Restore later or share · .json</span>
                 </div>
                 <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />
-                <div data-testid="open-history-desktop" onClick={()=>{setHistoryOpen(true);setDlOpen(false);}} style={{padding:"8px 14px",cursor:"pointer",display:"flex",flexDirection:"column",gap:2}} onMouseEnter={e=>e.currentTarget.style.background="#f6f8fa"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                  <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>Version History</span>
-                  <span style={{fontSize:10,color:"var(--mut)"}}>Browse &amp; restore snapshots</span>
-                </div>
-                <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />
                 <div onClick={()=>{setPdfExportOpen(true);setDlOpen(false);}} style={{padding:"8px 14px",cursor:"pointer",display:"flex",flexDirection:"column",gap:2}} onMouseEnter={e=>e.currentTarget.style.background="#f6f8fa"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                   <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>Export PDF</span>
                   <span style={{fontSize:10,color:"var(--mut)"}}>Print-ready exhibit or report</span>
@@ -4376,17 +4381,36 @@ function App() {
 
           <div style={{width:1,height:20,background:"var(--bd2)",flexShrink:0}} />
 
-          {/* Auto-save */}
+          {/* Save indicator — icon-only; flashes green on every confirmed Supabase
+              write. Click still links a local HTML file as a secondary backup. */}
           <button className="btn" onClick={openFile}
-            title={fileLinked ? "Auto-saving changes to file" : "Link this HTML file for auto-save"}
-            style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 8px",
-              ...(fileLinked?{borderColor:"#16a34a",color:"#16a34a",background:"#f0fdf4"}:{})}}>
-            <span style={{width:7,height:7,borderRadius:"50%",flexShrink:0,
-              background:fileLinked?(savePulse?"#16a34a":"#86efac"):"var(--bd2)",
-              boxShadow:fileLinked&&savePulse?"0 0 0 3px #bbf7d0":"none",transition:"all .3s"}} />
-            {fileLinked ? (savePulse ? "Saved ✓" : "Auto-Save") : "Auto-Save"}
+            title={(savePulse ? "Saved to cloud ✓" : "Auto-saves to cloud on every change")
+              + (fileLinked ? " · also writing to linked file" : " — click to also back up to a local file")}
+            style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px",
+              color: savePulse ? "#16a34a" : "var(--mut)",
+              borderColor: savePulse ? "#86efac" : (fileLinked ? "#bbf7d0" : undefined),
+              background: savePulse ? "#f0fdf4" : undefined,
+              boxShadow: savePulse ? "0 0 0 3px #dcfce7" : "none",
+              transition:"color .25s, background .25s, border-color .25s, box-shadow .25s"}}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+              <polyline points="17 21 17 13 7 13 7 21"/>
+              <polyline points="7 3 7 8 15 8"/>
+            </svg>
           </button>
 
+
+          {/* Version History — first-class entry; was buried in the download menu */}
+          <button data-testid="open-history-desktop" onClick={()=>{setHistoryOpen(true); setSettingsOpen(false); setAutomationOpen(false); setContactsOpen(false);}}
+            title="Version history — browse & restore snapshots"
+            className={historyOpen ? "btn act" : "btn"}
+            style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+              <polyline points="12 7 12 12 15 14"/>
+            </svg>
+            History
+          </button>
 
           {/* Contacts */}
           <button onClick={()=>{setContactsOpen(o=>!o); setSettingsOpen(false); setAutomationOpen(false);}} title="Contacts"
@@ -7330,9 +7354,10 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
   };
 
   return (
-    <div style={{flex:1,overflow:"auto",padding:16}}>
+    <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",overflow:"hidden",
+      padding:"12px 14px 14px",background:"var(--surf)"}}>
       {/* Header bar */}
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,flexShrink:0,flexWrap:"wrap",rowGap:8}}>
         <span style={{color:"var(--amber)",fontWeight:600,fontSize:13,letterSpacing:".08em"}}>TASK REPORT</span>
         <span style={{background:"#dbeafe",color:"#1d4ed8",borderRadius:8,padding:"1px 8px",fontSize:10}}>{filteredRows.length}</span>
 
@@ -7489,15 +7514,20 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
         </div>
       </div>
 
-      {/* Table */}
-      <div ref={tableWrapRef} style={{overflowX:"auto",outline:"none"}} tabIndex={0} onKeyDown={handleTableKey}
+      {/* Table — framed card; the card itself is the scroll container so the
+          column headers stay pinned while rows scroll underneath */}
+      <div ref={tableWrapRef} tabIndex={0} onKeyDown={handleTableKey}
+        style={{flex:1,minHeight:0,overflow:"auto",outline:"none",overscrollBehavior:"contain",
+          background:"var(--bg)",border:"1px solid var(--bd2)",borderRadius:10,
+          boxShadow:"0 1px 2px rgba(27,31,36,.05), 0 3px 12px rgba(27,31,36,.04)"}}
         onBlur={e=>{ if (!e.currentTarget.contains(e.relatedTarget)) setSelCell(null); }}>
-      <table style={{borderCollapse:"collapse",tableLayout:"fixed",
+      <table style={{borderCollapse:"collapse",tableLayout:"fixed",minWidth:"100%",
         width:30 + activeCols.reduce((s,c)=>s+(colWidths[c.k]||100),0),fontSize:12}}>
         <thead>
           <tr>
             <th key="__jump" style={{width:30,minWidth:30,maxWidth:30,padding:0,
-              borderBottom:"1px solid var(--bd2)",borderRight:"1px solid var(--bd)",background:"transparent"}} />
+              position:"sticky",top:0,zIndex:3,background:"#fafbfc",
+              boxShadow:"inset -1px 0 0 var(--bd), inset 0 -1px 0 var(--bd2)"}} />
             {displayCols.map(col => {
               const isActive = masterSort.col === col.k;
               const sortable = ["project","id","name","start","end","duration","health","percentComplete","responsibleParty","notes"].includes(col.k);
@@ -7512,13 +7542,14 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
                 onClick={sortable&&dragMCol===null ? ()=>setSort(col.k) : undefined}
                 style={{padding:"6px 10px",textAlign:"left",color:"var(--mut)",fontSize:10,
                   textTransform:"uppercase",fontWeight:600,letterSpacing:".06em",
-                  borderBottom:"1px solid var(--bd2)",borderRight:"1px solid var(--bd)",
-                  borderLeft:dragMOver===col.k&&dragMCol!==col.k?"2px solid var(--blue)":"2px solid transparent",
+                  position:"sticky",top:0,zIndex:3,
+                  boxShadow:(dragMOver===col.k&&dragMCol!==col.k?"inset 2px 0 0 var(--blue), ":"")
+                    +"inset -1px 0 0 var(--bd), inset 0 -1px 0 var(--bd2)",
                   whiteSpace:"nowrap",
                   width:colWidths[col.k],minWidth:colWidths[col.k],maxWidth:colWidths[col.k],
-                  position:"relative",userSelect:"none",overflow:"hidden",
+                  userSelect:"none",overflow:"hidden",
                   cursor:"grab",opacity:dragMCol===col.k?0.4:1,
-                  background:"transparent",transition:"border-color .1s,opacity .1s"}}>
+                  background:"#fafbfc",transition:"opacity .1s"}}>
                 <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
                   {col.label}
                   {sortable && (
@@ -7538,6 +7569,11 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
               </th>
               );
             })}
+            {/* Filler column — soaks up leftover width on wide screens so the
+                grid closes flush against the card edge instead of ending mid-page */}
+            <th key="__fill" aria-hidden="true" style={{width:"auto",minWidth:0,padding:0,
+              position:"sticky",top:0,zIndex:3,background:"#fafbfc",
+              boxShadow:"inset 0 -1px 0 var(--bd2)"}} />
           </tr>
         </thead>
         <tbody>
@@ -7546,7 +7582,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
             sortedRows.forEach(t => { (groups[t.projName] = groups[t.projName]||[]).push(t); });
             return Object.entries(groups).flatMap(([projName, gRows]) => [
               <tr key={`grp-${projName}`}>
-                <td colSpan={displayCols.length + 1} style={{
+                <td colSpan={displayCols.length + 2} style={{
                   padding:"10px 12px 8px", borderBottom:"1px solid var(--bd)",
                   background:"#f0f0f5", borderLeft:"4px solid var(--amber)"}}>
                   <span style={{fontSize:15,fontWeight:700,color:"var(--txt)",letterSpacing:"-.01em"}}>{projName}</span>
@@ -7559,6 +7595,7 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
                 <tr key={`${t.projId}-${t.id}`} style={{background:t.rowColor||(gri%2?"#f8fafc":"var(--bg)")}}>
                   {renderJumpCell(t)}
                   {displayCols.map(col => renderCell(t, col, ri))}
+                  <td style={{padding:0,borderBottom:"1px solid var(--bd)"}} />
                 </tr>
                 );
               })
@@ -7568,10 +7605,11 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
             <tr key={`${t.projId}-${t.id}`} style={{background:t.rowColor||(ri%2?"#f8fafc":"var(--bg)")}}>
               {renderJumpCell(t)}
               {displayCols.map(col => renderCell(t, col, ri))}
+              <td style={{padding:0,borderBottom:"1px solid var(--bd)"}} />
             </tr>
           ))}
           {rows.length===0 && (
-            <tr><td colSpan={displayCols.length + 1} style={{padding:40,textAlign:"center",color:"var(--mut)",fontSize:12,borderBottom:"1px solid var(--bd)"}}>
+            <tr><td colSpan={displayCols.length + 2} style={{padding:40,textAlign:"center",color:"var(--mut)",fontSize:12,borderBottom:"1px solid var(--bd)"}}>
               {filteredRows.length===0&&rows.length>0?"No tasks match the current filter.":"No tasks in this project yet."}
             </td></tr>
           )}
@@ -8460,6 +8498,9 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
         // Main upsert
         const { error } = await sb.from(TABLE).upsert({ key: k, value: parsed }, { onConflict: "key" });
         if (error) { console.error("Supabase set error:", error); return null; }
+
+        // Tell the UI a cloud write landed — drives the green save pulse in the header
+        try { window.dispatchEvent(new CustomEvent("planar:cloud-saved", { detail: { key: k } })); } catch {}
 
         // Layer 1: write a history snapshot (throttled for auto)
         const now = Date.now();
