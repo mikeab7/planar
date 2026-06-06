@@ -2822,6 +2822,23 @@ function App() {
   const fileSaveTimer = useRef(null);
   const [fileLinked,  setFileLinked]  = useState(false);
   const [savePulse,   setSavePulse]   = useState(false);
+  // Sticky save state: "saved" | "saving" | "error". Red ("error") persists
+  // until a save actually lands — it never times out or fades on its own.
+  const [saveStatus,  setSaveStatus]  = useState("saved");
+  const saveSeq       = useRef(0);      // ignore stale resolutions when saves overlap
+  const latestData    = useRef(null);   // freshest data, for retries
+  const saveStatusRef = useRef("saved");
+  useEffect(() => { saveStatusRef.current = saveStatus; }, [saveStatus]);
+
+  // One cloud-save attempt: mark "saving", then "saved"/"error" — unless a
+  // newer attempt has superseded this one (then its resolution decides).
+  const attemptCloudSave = (d) => {
+    const seq = ++saveSeq.current;
+    setSaveStatus("saving");
+    window.storage.set("hs-v1", JSON.stringify(d), { label: "auto" })
+      .then(res => { if (saveSeq.current === seq) setSaveStatus(res ? "saved" : "error"); })
+      .catch(()  => { if (saveSeq.current === seq) setSaveStatus("error"); });
+  };
   const [dlOpen,      setDlOpen]      = useState(false);
   const history      = useRef([]);
   const future       = useRef([]);  // Fix #8: redo stack
@@ -2956,7 +2973,8 @@ function App() {
 
   useEffect(() => {
     if (!data) return;
-    window.storage.set("hs-v1", JSON.stringify(data), { label: "auto" }).catch(() => {});
+    latestData.current = data;
+    attemptCloudSave(data);
     // Rebuild holiday set whenever settings change
     HOLIDAY_SET = buildHolidaySet(data.settings?.holidays || DEFAULT_HOLIDAYS);
     rebuildHEALTH(data.settings?.customHealth || [], data.settings?.healthLabelOverrides || {});
@@ -3004,6 +3022,27 @@ function App() {
     const onSaved = () => { setSavePulse(true); clearTimeout(t); t = setTimeout(() => setSavePulse(false), 1500); };
     window.addEventListener("planar:cloud-saved", onSaved);
     return () => { window.removeEventListener("planar:cloud-saved", onSaved); clearTimeout(t); };
+  }, []);
+
+  // While unsaved, retry automatically — every 20s, and the moment the
+  // connection comes back. Red clears itself the instant a retry lands.
+  useEffect(() => {
+    if (saveStatus !== "error") return;
+    const retry = () => { if (latestData.current) attemptCloudSave(latestData.current); };
+    const iv = setInterval(retry, 20000);
+    window.addEventListener("online", retry);
+    return () => { clearInterval(iv); window.removeEventListener("online", retry); };
+  }, [saveStatus]);
+
+  // Last line of defense: if the tab is closed while the latest changes
+  // haven't reached the cloud, the browser asks for confirmation first.
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (saveStatusRef.current === "saved") return;
+      e.preventDefault(); e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
   useEffect(() => {
@@ -4264,9 +4303,10 @@ function App() {
             <div style={{position:"relative"}}>
               {mobMenuOpen && <div style={{position:"fixed",inset:0,zIndex:998}} onClick={()=>setMobMenuOpen(false)} />}
               <button onClick={()=>setMobMenuOpen(o=>!o)} aria-label="More actions"
-                style={{background:mobMenuOpen?"#eef2ff":"none",border:"1px solid var(--bd2)",cursor:"pointer",
+                style={{background:mobMenuOpen?"#eef2ff":saveStatus==="error"?"#fef2f2":"none",
+                  border:saveStatus==="error"?"1px solid #fca5a5":"1px solid var(--bd2)",cursor:"pointer",
                   borderRadius:5,padding:"6px 10px",display:"flex",alignItems:"center",gap:3,
-                  color:mobMenuOpen?"var(--amber)":"var(--mut)",transition:"all .12s"}}>
+                  color:saveStatus==="error"?"#dc2626":mobMenuOpen?"var(--amber)":"var(--mut)",transition:"all .12s"}}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               {mobMenuOpen && (
@@ -4274,13 +4314,13 @@ function App() {
                   border:"1px solid var(--bd2)",borderRadius:8,boxShadow:"0 6px 24px rgba(0,0,0,.14)",
                   zIndex:999,minWidth:220,padding:"6px 0",overflow:"hidden"}}>
                   {/* Auto-Save status row */}
-                  <div onClick={()=>{openFile();setMobMenuOpen(false);}}
+                  <div onClick={()=>{ if (saveStatus==="error") { if (latestData.current) attemptCloudSave(latestData.current); } else { openFile(); } setMobMenuOpen(false);}}
                     style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:9,borderBottom:"1px solid var(--bd)"}}>
                     <span style={{width:9,height:9,borderRadius:"50%",flexShrink:0,
-                      background:fileLinked?"#16a34a":"var(--bd2)"}} />
+                      background:saveStatus==="error"?"#dc2626":fileLinked?"#16a34a":"var(--bd2)"}} />
                     <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>{fileLinked?"Backup File Linked":"Link Backup File"}</span>
-                      <span style={{fontSize:10,color:"var(--mut)"}}>{fileLinked?"Cloud + local file":"Cloud auto-save is always on"}</span>
+                      <span style={{fontSize:13,color:saveStatus==="error"?"#dc2626":"var(--txt)",fontWeight:saveStatus==="error"?600:500}}>{saveStatus==="error"?"Not saved — tap to retry":fileLinked?"Backup File Linked":"Link Backup File"}</span>
+                      <span style={{fontSize:10,color:saveStatus==="error"?"#dc2626":"var(--mut)"}}>{saveStatus==="error"?"Changes have NOT reached the cloud":fileLinked?"Cloud + local file":"Cloud auto-save is always on"}</span>
                     </div>
                   </div>
                   {/* Download options */}
@@ -4381,46 +4421,52 @@ function App() {
 
           <div style={{width:1,height:20,background:"var(--bd2)",flexShrink:0}} />
 
-          {/* Save indicator — icon-only; flashes green on every confirmed Supabase
-              write. Click still links a local HTML file as a secondary backup. */}
-          <button className="btn" onClick={openFile}
-            title={(savePulse ? "Saved to cloud ✓" : "Auto-saves to cloud on every change")
-              + (fileLinked ? " · also writing to linked file" : " — click to also back up to a local file")}
-            style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px",
-              color: savePulse ? "#16a34a" : "var(--mut)",
-              borderColor: savePulse ? "#86efac" : (fileLinked ? "#bbf7d0" : undefined),
-              background: savePulse ? "#f0fdf4" : undefined,
-              boxShadow: savePulse ? "0 0 0 3px #dcfce7" : "none",
+          {/* Save indicator — sticky tri-state. Gray = saved (quiet). Amber = write
+              in flight. RED = latest changes did NOT reach the cloud; stays red,
+              retries automatically, click retries now. Green flash on each save. */}
+          <button className="btn"
+            onClick={saveStatus === "error"
+              ? () => { if (latestData.current) attemptCloudSave(latestData.current); }
+              : openFile}
+            title={saveStatus === "error" ? "Changes NOT saved to cloud — retrying automatically. Click to retry now."
+              : saveStatus === "saving" ? "Saving to cloud…"
+              : (savePulse ? "Saved to cloud ✓" : "All changes saved to cloud")
+                + (fileLinked ? " · also writing to linked file" : " — click to also back up to a local file")}
+            style={{display:"flex",alignItems:"center",justifyContent:"center",gap:5,padding:"3px 8px",
+              fontSize:11,fontWeight:600,
+              color: saveStatus === "error" ? "#dc2626" : savePulse ? "#16a34a" : saveStatus === "saving" ? "#b45309" : "var(--mut)",
+              borderColor: saveStatus === "error" ? "#fca5a5" : savePulse ? "#86efac" : (fileLinked ? "#bbf7d0" : undefined),
+              background: saveStatus === "error" ? "#fef2f2" : savePulse ? "#f0fdf4" : undefined,
+              boxShadow: savePulse && saveStatus !== "error" ? "0 0 0 3px #dcfce7" : "none",
               transition:"color .25s, background .25s, border-color .25s, box-shadow .25s"}}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
               <polyline points="17 21 17 13 7 13 7 21"/>
               <polyline points="7 3 7 8 15 8"/>
             </svg>
+            {saveStatus === "error" && "Not saved"}
           </button>
 
 
-          {/* Version History — first-class entry; was buried in the download menu */}
+          {/* Version History — icon-only; tooltip names it */}
           <button data-testid="open-history-desktop" onClick={()=>{setHistoryOpen(true); setSettingsOpen(false); setAutomationOpen(false); setContactsOpen(false);}}
             title="Version history — browse & restore snapshots"
             className={historyOpen ? "btn act" : "btn"}
-            style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px"}}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
               <polyline points="12 7 12 12 15 14"/>
             </svg>
-            History
           </button>
 
-          {/* Contacts */}
+          {/* Contacts — icon-only; tooltip names it */}
           <button onClick={()=>{setContactsOpen(o=>!o); setSettingsOpen(false); setAutomationOpen(false);}} title="Contacts"
             className={contactsOpen ? "btn act" : "btn"}
-            style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px"}}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
               <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
             </svg>
-            Contacts
           </button>
 
           {/* Automation */}
@@ -7682,14 +7728,20 @@ ${isMilestone?`<polygon points="${bx},${midY-5} ${bx+5},${midY} ${bx},${midY+5} 
   }).join("");
   // Grid lines every month (subtle), labels only at computed density, year boundaries emphasized
   const gridLines=months.map(m=>`<line x1="${m.x}" y1="${HEADER_H}" x2="${m.x}" y2="${svgH}" stroke="${m.mo===0?'#bbb':'#eee'}" stroke-width="${m.mo===0?0.8:0.4}"/>`).join("")
-    +visibleMonths.map(m=>`<text x="${m.x+3}" y="15" font-size="7.5" fill="#bbb" font-family="Arial,sans-serif">${m.label}</text>`).join("")
-    +(monthPx<26?yearMarkers.map(m=>`<line x1="${m.x}" y1="0" x2="${m.x}" y2="${HEADER_H}" stroke="#666" stroke-width="1"/>`).join(""):"");
+    +visibleMonths.map(m=>`<text x="${m.x+3}" y="15" font-size="7.5" fill="#e8e8e8" font-family="Arial,sans-serif">${m.label}</text>`).join("")
+    +(monthPx<26?yearMarkers.map(m=>`<line x1="${m.x}" y1="0" x2="${m.x}" y2="${HEADER_H}" stroke="#999" stroke-width="1"/>`).join(""):"");
+  // Today marker — red dashed line with a tick in the header band
+  const todayStr=fd(new Date());
+  const todayLine=(opts.showToday!==false && todayStr>=minD&&todayStr<=maxD)
+    ? `<line x1="${xOf(todayStr)}" y1="${HEADER_H}" x2="${xOf(todayStr)}" y2="${svgH}" stroke="#dc2626" stroke-width="1" stroke-dasharray="3,2"/>
+<polygon points="${xOf(todayStr)-3.5},${HEADER_H-6} ${xOf(todayStr)+3.5},${HEADER_H-6} ${xOf(todayStr)},${HEADER_H}" fill="#dc2626"/>`
+    : "";
   const taskHeaderText = noLabels ? "" : `<text x="4" y="15" font-size="8" font-weight="bold" fill="#fff" font-family="Arial,sans-serif">TASK</text>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgH}" style="width:100%;display:block;border:1px solid #e8e8e8">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgH}" style="width:100%;display:block">
 <rect width="${svgWidth}" height="${svgH}" fill="#fff"/>
 <rect x="0" y="0" width="${svgWidth}" height="${HEADER_H}" fill="#1a1a1a"/>
 ${taskHeaderText}
-${gridLines}${rows}</svg>`;
+${gridLines}${rows}${todayLine}</svg>`;
 }
 
 function buildPDFHtml(cfg, data, forPreview) {
@@ -7721,6 +7773,13 @@ function buildPDFHtml(cfg, data, forPreview) {
   const pgW=isLand?ps.h:ps.w, pgR=isLand?ps.w:ps.h;
   const contentW=pgW-parseFloat(cfg.margins.left||0.75)-parseFloat(cfg.margins.right||0.75);
   const contentPx=Math.max(300,Math.round(contentW*96));
+  // px geometry for the WYSIWYG preview paginator — 96 CSS px per inch, the same
+  // density the browser print engine uses, so preview math = print math
+  const mTopPx=Math.round(parseFloat(cfg.margins.top||0.75)*96);
+  const mBotPx=Math.round(parseFloat(cfg.margins.bottom||0.75)*96);
+  const mLeftPx=Math.round(parseFloat(cfg.margins.left||0.75)*96);
+  const mRightPx=Math.round(parseFloat(cfg.margins.right||0.75)*96);
+  const pageWpx=Math.round(pgW*96), pageHpx=Math.round(pgR*96);
 
   let bodyHtml="";
   if(cfg.includeGantt) {
@@ -7736,10 +7795,12 @@ function buildPDFHtml(cfg, data, forPreview) {
       }).join("");
       // Filter the project for Gantt to match the table's task list
       const ganttProj={...proj, tasks};
-      // Allocate ~50% to the table, the rest to Gantt — with a minimum Gantt width
-      const tableW=Math.min(Math.round(contentPx*0.5), Math.max(280, contentPx - 320));
-      const ganttW=contentPx - tableW;
-      const ganttSvg=buildGanttSVG([ganttProj], ganttW, cfg.orientation, {noLabels:true});
+      // Allocate ~50% to the table, the rest to Gantt — the 1px frame on each
+      // side of .split-view consumes 2px of the printable width
+      const splitInner=contentPx-2;
+      const tableW=Math.min(Math.round(splitInner*0.5), Math.max(280, splitInner - 320));
+      const ganttW=splitInner - tableW;
+      const ganttSvg=buildGanttSVG([ganttProj], ganttW, cfg.orientation, {noLabels:true, showToday:cfg.showToday!==false});
       bodyHtml+=`<div class="proj-block">${selProjs.length>1?`<div class="proj-name">${escapeHtml(proj.name)}</div>`:""}
         <div class="split-view">
           <div class="split-table" style="width:${tableW}px;flex-shrink:0">
@@ -7775,6 +7836,15 @@ body{padding:${cfg.margins.top}in ${cfg.margins.right}in ${cfg.margins.bottom}in
 .doc-header{page-break-inside:avoid;break-inside:avoid}
 .doc-footer{page-break-inside:avoid;break-inside:avoid}
 .proj-block+.proj-block{page-break-before:always;break-before:page}
+/* Split view: do NOT repeat table headers on continuation pages — the Gantt SVG
+   beside the table can't repeat anything, so a repeated thead shifts every row
+   ~22px out of alignment with its bar on each page after the first. */
+@media print{.split-view thead{display:table-row-group}}
+/* Tables-only mode: frame the table; keep rows whole across page breaks.
+   (Split view intentionally keeps pixel slicing — pushing table rows while the
+   Gantt SVG slices freely would desync rows from bars.) */
+.proj-block>table{border:1px solid #d4d4d4}
+.proj-block>table tbody tr{page-break-inside:avoid;break-inside:avoid}
 
 .doc-header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:10px;margin-bottom:18px;border-bottom:2.5px solid #1a1a1a}
 .dh-left .exhibit{font-size:8.5px;font-weight:700;color:#4f46e5;letter-spacing:.12em;text-transform:uppercase;margin-bottom:3px}
@@ -7785,7 +7855,8 @@ body{padding:${cfg.margins.top}in ${cfg.margins.right}in ${cfg.margins.bottom}in
 .dh-right .conf{color:#b91c1c;font-weight:700;font-size:9px;margin-top:2px}
 .proj-block{margin-bottom:20px}
 .proj-name{font-size:14px;font-weight:700;color:#4f46e5;letter-spacing:0;padding-bottom:5px;margin-bottom:9px;border-bottom:2px solid #4f46e5}
-.split-view{display:flex;align-items:flex-start;width:100%}
+.split-view{display:flex;align-items:flex-start;width:100%;border:1px solid #d4d4d4}
+.split-table{border-right:1px solid #d4d4d4}
 .split-table table.aligned{width:100%;border-collapse:collapse;font-size:9px;table-layout:fixed}
 .split-table table.aligned thead th{height:22px;padding:0 6px;vertical-align:middle;background:#1a1a1a;color:#fff;font-weight:700;font-size:8px;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;text-align:left}
 .split-table table.aligned tbody tr{height:18px}
@@ -7810,26 +7881,201 @@ td{padding:4px 6px;vertical-align:middle;line-height:1.3}
 @media print{.print-bar{display:none}}
 </style></head><body>
 <div class="print-bar"${forPreview?' style="display:none"':''}><button class="btn-cl" onclick="window.close()">&#x2715; Close</button><button class="btn-pdf" onclick="window.print()">&#8595; Save as PDF</button></div>
-${forPreview ? `<script>
+<script>
+/*__PAGINATE_SRC__*/
 (function(){
-  var PH=${Math.round((isLand?ps.w:ps.h)*96)};
-  window.addEventListener('load',function(){
-    document.body.style.position='relative';
-    var total=document.body.scrollHeight;
-    // Report full height to parent so the iframe container resizes correctly
-    window.parent.postMessage({type:'planarPreviewHeight', h: total}, '*');
-    for(var i=1;i*PH<total+10;i++){
-      var d=document.createElement('div');
-      d.style.cssText='position:absolute;left:0;right:0;top:'+(i*PH-6)+'px;height:12px;background:#c5cdd6;z-index:9998;pointer-events:none;display:flex;align-items:center;padding:0 10px;box-sizing:border-box;border-top:1.5px dashed #9aa8b2;border-bottom:1.5px dashed #9aa8b2';
-      var s=document.createElement('span');
-      s.textContent='— page '+(i+1)+' —';
-      s.style.cssText='font-size:7px;color:#6b7a88;font-family:Arial,sans-serif;letter-spacing:0.8px;font-weight:600;text-transform:uppercase';
-      d.appendChild(s);
-      document.body.appendChild(d);
+  var MODE='${forPreview?"preview":"print"}';
+  var MT=${mTopPx}, MB=${mBotPx}, ML=${mLeftPx}, MR=${mRightPx};
+  var PW=${pageWpx}, PH=${pageHpx};
+  var CW=PW-ML-MR, CH=Math.max(160,PH-MT-MB)-2;  /* printable height, 2px sub-pixel slack */
+  var GANTT_HEAD=22, GANTT_ROW=18;               /* must match buildGanttSVG */
+  var FRAME='#d4d4d4';
+
+  function outerH(el){
+    if(!el) return 0;
+    var cs=getComputedStyle(el);
+    return el.getBoundingClientRect().height+(parseFloat(cs.marginTop)||0)+(parseFloat(cs.marginBottom)||0);
+  }
+
+/*__PACK_SRC__*/
+  /* Pure pagination: every page is a self-contained unit. Each chunk carries its
+     own column header (headOv = frame + thead); continuation chunks add a
+     "(continued)" label (contH). Whole rows only - a row never splits. */
+  function packPages(model, BUDGET){
+    var pages=[], cur=null, used=0;
+    function open(){ cur={doc:false,proj:-1,name:false,cont:false,r0:0,r1:0,foot:false}; used=0; }
+    function close(){ if(cur) pages.push(cur); cur=null; }
+    open();
+    if(model.docH){ cur.doc=true; used+=model.docH; }
+    for(var p=0;p<model.projs.length;p++){
+      var pr=model.projs[p];
+      if(p>0){ close(); open(); }                 /* each project starts a fresh page */
+      var i=0, first=true;
+      while(i<pr.rows.length || first){
+        var ov=(first?pr.nameH:pr.contH)+pr.headOv;
+        var avail=BUDGET-used-ov;
+        var cnt=0,h=0;
+        while(i+cnt<pr.rows.length && h+pr.rows[i+cnt]<=avail){ h+=pr.rows[i+cnt]; cnt++; }
+        if(cnt===0 && i<pr.rows.length){
+          if(used>0){ close(); open(); continue; }/* retry on a clean page */
+          cnt=1; h=pr.rows[i];                    /* single row taller than a page: force */
+        }
+        cur.proj=p;
+        if(first) cur.name=true; else cur.cont=true;
+        cur.r0=i; cur.r1=i+cnt;
+        used+=ov+h; i+=cnt; first=false;
+        if(i<pr.rows.length){ close(); open(); }
+        else break;
+      }
     }
-  });
+    if(model.footH){
+      if(used+model.footH>BUDGET && used>0){ close(); open(); }
+      cur.foot=true; used+=model.footH;
+    }
+    close();
+    return pages;
+  }
+/*__PACK_END__*/
+
+  function paginate(){
+    var body=document.body;
+    /* 1. Stage the document offscreen at exact printable width and measure. */
+    var master=document.createElement('div');
+    master.style.cssText='width:'+CW+'px;position:absolute;left:-100000px;top:0;background:#fff';
+    var kids=[].slice.call(body.children);
+    for(var i=0;i<kids.length;i++){
+      var el=kids[i];
+      if(el.tagName==='SCRIPT'||el.tagName==='STYLE') continue;
+      if(el.classList&&el.classList.contains('print-bar')) continue;
+      master.appendChild(el);
+    }
+    body.style.padding='0'; body.style.margin='0';
+    body.appendChild(master);
+
+    var docEl=master.querySelector('.doc-header');
+    var footEl=master.querySelector('.doc-footer');
+    var blocks=[].slice.call(master.querySelectorAll('.proj-block'));
+    /* continuation label sample - measured once, reused */
+    var contSample=document.createElement('div');
+    contSample.style.cssText='font:600 9px Arial,sans-serif;color:#4f46e5;letter-spacing:.04em;padding:0 0 4px';
+    contSample.textContent='X - continued';
+    master.appendChild(contSample);
+    var contH=outerH(contSample);
+    master.removeChild(contSample);
+
+    var projs=[];
+    for(var b=0;b<blocks.length;b++){
+      var blk=blocks[b];
+      var nameEl=blk.querySelector('.proj-name');
+      var sv=blk.querySelector('.split-view');
+      var tableEl=sv?sv.querySelector('table'):blk.querySelector('table');
+      var theadEl=tableEl?tableEl.querySelector('thead'):null;
+      var rowEls=tableEl?[].slice.call(tableEl.querySelectorAll('tbody tr')):[];
+      var svgEl=sv?sv.querySelector('svg'):null;
+      var tHalf=sv?sv.querySelector('.split-table'):null;
+      projs.push({
+        nameEl:nameEl, nameH:outerH(nameEl),
+        nameTxt:nameEl?nameEl.textContent:'',
+        split:!!sv,
+        tableW:tHalf?tHalf.getBoundingClientRect().width:0,
+        ganttW:svgEl?svgEl.getBoundingClientRect().width:0,
+        theadEl:theadEl, rowEls:rowEls, svgEl:svgEl,
+        contH:contH,
+        headOv:2+(theadEl?theadEl.getBoundingClientRect().height:0),
+        rows:rowEls.map(function(r){return r.getBoundingClientRect().height;})
+      });
+    }
+    var model={docH:outerH(docEl), footH:outerH(footEl), projs:projs};
+    var pages=packPages(model, CH);
+
+    /* 2. Assemble each page as a real, self-contained DOM unit. */
+    function svgWindow(svgEl,y0,h,w){
+      var win=document.createElement('div');
+      win.style.cssText='width:'+w+'px;height:'+h+'px;overflow:hidden;position:relative;flex-shrink:0';
+      var c=svgEl.cloneNode(true);
+      c.style.position='absolute'; c.style.left='0'; c.style.top=(-y0)+'px'; c.style.width=w+'px';
+      win.appendChild(c);
+      return win;
+    }
+    function buildPage(pg){
+      var page=document.createElement('div');
+      page.style.cssText='width:'+CW+'px;background:#fff';
+      if(pg.doc&&docEl) page.appendChild(docEl);
+      if(pg.proj>=0){
+        var pr=projs[pg.proj];
+        if(pg.name&&pr.nameEl) page.appendChild(pr.nameEl);
+        if(pg.cont){
+          var cl=document.createElement('div');
+          cl.style.cssText='font:600 9px Arial,sans-serif;color:#4f46e5;letter-spacing:.04em;padding:0 0 4px';
+          cl.textContent=pr.nameTxt+' - continued';
+          page.appendChild(cl);
+        }
+        var framed=document.createElement('div');
+        framed.style.cssText='border:1px solid '+FRAME+';background:#fff'+(pr.split?';display:flex;align-items:flex-start':'');
+        var tbl=document.createElement('table');
+        tbl.className='aligned';
+        if(pr.theadEl) tbl.appendChild(pr.theadEl.cloneNode(true));
+        var tb=document.createElement('tbody');
+        for(var r=pg.r0;r<pg.r1;r++) tb.appendChild(pr.rowEls[r]);   /* move real rows */
+        tbl.appendChild(tb);
+        if(pr.split){
+          var left=document.createElement('div');
+          left.className='split-table';
+          left.style.cssText='width:'+pr.tableW+'px;flex-shrink:0';
+          left.appendChild(tbl);
+          framed.appendChild(left);
+          var right=document.createElement('div');
+          right.style.cssText='width:'+pr.ganttW+'px;flex-shrink:0';
+          right.appendChild(svgWindow(pr.svgEl,0,GANTT_HEAD,pr.ganttW));                                  /* date band: repeats every page */
+          if(pg.r1>pg.r0) right.appendChild(svgWindow(pr.svgEl,GANTT_HEAD+pg.r0*GANTT_ROW,(pg.r1-pg.r0)*GANTT_ROW,pr.ganttW));
+          framed.appendChild(right);
+        } else {
+          framed.appendChild(tbl);
+        }
+        page.appendChild(framed);
+      }
+      if(pg.foot&&footEl) page.appendChild(footEl);
+      return page;
+    }
+
+    var pageEls=pages.map(buildPage);
+    master.parentNode.removeChild(master);
+
+    /* 3. Render: preview = sheets on gray; print = one block per page. */
+    if(MODE==='preview'){
+      var wrap=document.createElement('div');
+      wrap.style.cssText='width:'+PW+'px;padding:14px 0 6px;box-sizing:border-box';
+      for(var p=0;p<pageEls.length;p++){
+        var sheet=document.createElement('div');
+        sheet.style.cssText='width:'+PW+'px;height:'+PH+'px;background:#fff;box-sizing:border-box;padding:'+MT+'px '+MR+'px '+MB+'px '+ML+'px;overflow:hidden;box-shadow:0 1px 5px rgba(0,0,0,.35)';
+        sheet.appendChild(pageEls[p]);
+        wrap.appendChild(sheet);
+        var lbl=document.createElement('div');
+        lbl.textContent='Page '+(p+1)+' of '+pageEls.length;
+        lbl.style.cssText='text-align:center;font:600 8px Arial,sans-serif;color:#56616b;letter-spacing:.9px;text-transform:uppercase;padding:7px 0 11px';
+        wrap.appendChild(lbl);
+      }
+      body.style.background='#a9b2bb';
+      body.appendChild(wrap);
+      window.parent.postMessage({type:'planarPreviewHeight', h: body.scrollHeight}, '*');
+    } else {
+      var st=document.createElement('style');
+      st.textContent='.pg{page-break-after:always;break-after:page;page-break-inside:avoid;break-inside:avoid}'
+        +'.pg:last-child{page-break-after:auto;break-after:auto}'
+        +'@media screen{body{background:#eef0f2;padding:18px 0}.pg{margin:0 auto 16px;outline:1px solid #d8d8d8;background:#fff;padding:'+MT+'px '+MR+'px '+MB+'px '+ML+'px;width:'+PW+'px;box-sizing:border-box}}'
+        +'@media print{.pg{width:'+CW+'px}}';
+      document.head.appendChild(st);
+      for(var q=0;q<pageEls.length;q++){ pageEls[q].className='pg'; body.appendChild(pageEls[q]); }
+    }
+  }
+  function go(){
+    if(document.fonts && document.fonts.ready){ document.fonts.ready.then(function(){ setTimeout(paginate,30); }); }
+    else setTimeout(paginate,80);
+  }
+  window.addEventListener('load',go);
 })();
-<\/script>` : ''}
+/*__PAGINATE_END__*/
+<\/script>
 <div class="doc-header">
   <div class="dh-left">
     ${cfg.exhibitLabel?`<div class="exhibit">${escapeHtml(cfg.exhibitLabel)}</div>`:""}
@@ -7865,11 +8111,15 @@ function PDFExportModal({data, activePid, onClose}) {
     selProjects: activePid ? [String(activePid)] : projs.map(p => String(p.id)),
     columns: (() => { const PRINTABLE=new Set(["id","name","start","end","duration","health","percentComplete","responsibleParty","predecessors"]); const mc=(data.masterCols||[]).filter(k=>PRINTABLE.has(k)); return mc.length>0?mc:["id","name","start","end","duration","health","responsibleParty"]; })(),
     includeGantt: true,
+    showToday: true,
     healthFilter: "all",
     confidential: "",
   });
   const upd = patch => setCfg(c => ({...c, ...patch}));
   const [headerOpen, setHeaderOpen] = useState(false);
+  // Collapsible sidebar sections — default open; clicking a section header toggles it
+  const [secOpen, setSecOpen] = useState({});
+  const secIsOpen = k => secOpen[k] !== false;
 
   // Debounced config for preview (avoids re-render on every keystroke)
   const [previewCfg, setPreviewCfg] = useState(cfg);
@@ -7970,9 +8220,18 @@ function PDFExportModal({data, activePid, onClose}) {
       onFocus={e=>e.target.style.borderColor="var(--blue)"}
       onBlur={e=>e.target.style.borderColor="var(--bd2)"} />
   );
-  const SHdr = ({title}) => (
-    <div style={{fontSize:9,fontWeight:700,color:"var(--mut)",letterSpacing:".08em",textTransform:"uppercase",
-      padding:"9px 0 5px",borderBottom:"1px solid var(--bd)",marginBottom:5}}>{title}</div>
+  const SHdr = ({title,k}) => (
+    <div onClick={k ? ()=>setSecOpen(s=>({...s,[k]:!(s[k]!==false)})) : undefined}
+      style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+        fontSize:9,fontWeight:700,color:"var(--mut)",letterSpacing:".08em",textTransform:"uppercase",
+        padding:"9px 0 5px",borderBottom:"1px solid var(--bd)",marginBottom:5,
+        cursor:k?"pointer":"default",userSelect:"none"}}
+      onMouseEnter={k ? (e=>e.currentTarget.style.opacity="0.7") : undefined}
+      onMouseLeave={k ? (e=>e.currentTarget.style.opacity="1") : undefined}>
+      {title}
+      {k && <span style={{fontSize:10,color:"var(--mut)",transform:secIsOpen(k)?"rotate(180deg)":"rotate(0deg)",
+        transition:"transform .2s",display:"inline-block",lineHeight:1}}>▾</span>}
+    </div>
   );
   const Row = ({label,children}) => (
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"3px 0",gap:8,minHeight:26}}>
@@ -8013,7 +8272,8 @@ function PDFExportModal({data, activePid, onClose}) {
           {/* Config sidebar */}
           <div style={{width:252,flexShrink:0,borderRight:"1px solid var(--bd)",overflowY:"auto",padding:"0 14px 16px",background:"#fff"}}>
 
-            <SHdr title="Projects" />
+            <SHdr title="Projects" k="projects" />
+            {secIsOpen("projects") && (
             <div style={{display:"flex",flexDirection:"column",gap:1,marginBottom:4}}>
               {projs.map(p=>(
                 <label key={p.id} style={{display:"flex",alignItems:"center",gap:7,cursor:"pointer",padding:"3px 4px",borderRadius:3,transition:"background .1s"}}
@@ -8026,8 +8286,10 @@ function PDFExportModal({data, activePid, onClose}) {
                 </label>
               ))}
             </div>
+            )}
 
-            <SHdr title="Layout" />
+            <SHdr title="Layout" k="layout" />
+            {secIsOpen("layout") && (<>
             <Row label="Size">
               <select value={cfg.pageSize} onChange={e=>upd({pageSize:e.target.value})}
                 style={{flex:1,background:"var(--bg)",border:"1px solid var(--bd2)",borderRadius:3,
@@ -8046,8 +8308,13 @@ function PDFExportModal({data, activePid, onClose}) {
               <SegBtn small options={[{l:"All",v:"all"},{l:"Active",v:"active"},{l:"Done",v:"complete"}]} value={cfg.healthFilter} onChange={v=>upd({healthFilter:v})} />
             </Row>
             <Row label="Gantt"><Toggle on={cfg.includeGantt} onChange={v=>upd({includeGantt:v})} /></Row>
+            {cfg.includeGantt && (
+              <Row label="Today line"><Toggle on={cfg.showToday!==false} onChange={v=>upd({showToday:v})} /></Row>
+            )}
+            </>)}
 
-            <SHdr title="Margins" />
+            <SHdr title="Margins" k="margins" />
+            {secIsOpen("margins") && (
             <div style={{marginBottom:6}}>
               <div style={{display:"flex",gap:4,marginBottom:6}}>
                 {[{l:"Narrow",v:"0.5"},{l:"Normal",v:"0.75"},{l:"Wide",v:"1.0"}].map(p=>{
@@ -8074,6 +8341,7 @@ function PDFExportModal({data, activePid, onClose}) {
                 ))}
               </div>
             </div>
+            )}
 
             {/* Collapsible Header / Cover section */}
             <div onClick={()=>setHeaderOpen(o=>!o)}
@@ -8098,7 +8366,8 @@ function PDFExportModal({data, activePid, onClose}) {
               </div>
             )}
 
-            <SHdr title="Columns" />
+            <SHdr title="Columns" k="columns" />
+            {secIsOpen("columns") && (
             <div style={{display:"flex",flexDirection:"column",gap:1}}>
               {COL_OPTS.map(c=>(
                 <label key={c.k} style={{display:"flex",alignItems:"center",gap:7,cursor:"pointer",padding:"3px 4px",borderRadius:3,transition:"background .1s"}}
@@ -8111,6 +8380,7 @@ function PDFExportModal({data, activePid, onClose}) {
                 </label>
               ))}
             </div>
+            )}
 
           </div>
 
@@ -8131,10 +8401,8 @@ function PDFExportModal({data, activePid, onClose}) {
                 width: pageW * scale,
                 height: iframeH * scale,
                 flexShrink: 0,
-                boxShadow: "0 4px 32px rgba(0,0,0,0.28), 0 1px 6px rgba(0,0,0,0.15)",
-                borderRadius: 2,
                 overflow: "hidden",
-                background: "#fff",
+                background: "transparent",
                 position: "relative",
               }}>
                 <iframe
