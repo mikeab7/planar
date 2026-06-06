@@ -2788,6 +2788,9 @@ function App() {
   const [selRange,      setSelRange]      = useState(null); // {r1,r2,c1,c2} — row/col indices into flatTasks/COLS
   const [selectedColIdx, setSelectedColIdx] = useState(0);
   const [goToFocus,      setGoToFocus]      = useState(null); // {taskId, n} — grid scrolls to + pulses this row after a cross-view jump
+  const [offlineFallback, setOfflineFallback] = useState(false);
+  const [staleNotice, setStaleNotice] = useState(false);
+  const didInitialLoad = useRef(false);
   const [formatOpen, setFormatOpen] = useState(false);
   const [settingsOpen,    setSettingsOpen]    = useState(false);
   const [automationOpen,  setAutomationOpen]  = useState(false);
@@ -2990,10 +2993,12 @@ function App() {
             tasks = rollupParentDates(tasks);
             d.projects[pid] = {...d.projects[pid], tasks};
           });
+        if (window.__planarCloudError) setOfflineFallback(true);
         setData(d);
       } catch {
         const d = ensureContacts(normalizeIds(ensureHolidays(normalizeToV6(window.__PLANAR_DATA__ || SEED))));
         if (window.innerWidth < 768) d.view = "grid";
+        setOfflineFallback(true);
         setData(d);
       }
     })();
@@ -3002,7 +3007,10 @@ function App() {
   useEffect(() => {
     if (!data) return;
     latestData.current = data;
-    attemptCloudSave(data);
+    // Don't re-save on initial load -- loading shouldn't mint a new version
+    // (that collision is what made two freshly-opened tabs fight). Real edits only.
+    if (!didInitialLoad.current) didInitialLoad.current = true;
+    else attemptCloudSave(data);
     // Rebuild holiday set whenever settings change
     HOLIDAY_SET = buildHolidaySet(data.settings?.holidays || DEFAULT_HOLIDAYS);
     ROW_H = Math.min(34, Math.max(20, data.settings?.rowHeight || 24));
@@ -3048,7 +3056,7 @@ function App() {
   // means "not yet confirmed" rather than "feature not set up"
   useEffect(() => {
     let t;
-    const onSaved = () => { setSavePulse(true); clearTimeout(t); t = setTimeout(() => setSavePulse(false), 1500); };
+    const onSaved = () => { setSavePulse(true); setOfflineFallback(false); clearTimeout(t); t = setTimeout(() => setSavePulse(false), 1500); };
     window.addEventListener("planar:cloud-saved", onSaved);
     return () => { window.removeEventListener("planar:cloud-saved", onSaved); clearTimeout(t); };
   }, []);
@@ -3062,6 +3070,37 @@ function App() {
     window.addEventListener("online", retry);
     return () => { clearInterval(iv); window.removeEventListener("online", retry); };
   }, [saveStatus]);
+
+  // -- Multi-device live-refresh -- every 20s (and on focus / reconnect / tab
+  // switch) ask the cloud whether another device saved a newer version. A clean
+  // tab (everything saved) takes the latest: silently if it's backgrounded, or
+  // via a one-click banner if you're looking at it. A tab with unsaved edits is
+  // never auto-clobbered -- it just shows the banner. The storage-layer guard is
+  // the hard backstop that blocks a stale save no matter what.
+  useEffect(() => {
+    let stopped = false;
+    const check = async () => {
+      if (stopped || !window.storage || !window.storage.checkRemote) return;
+      try {
+        const r = await window.storage.checkRemote("hs-v1");
+        if (!r || !r.ok || !r.newer) return;
+        if (saveStatusRef.current === "saved" && document.hidden) window.location.reload();
+        else setStaleNotice(true);
+      } catch (e) {}
+    };
+    const iv = setInterval(check, 20000);
+    window.addEventListener("focus", check);
+    window.addEventListener("online", check);
+    document.addEventListener("visibilitychange", check);
+    return () => { stopped = true; clearInterval(iv); window.removeEventListener("focus", check); window.removeEventListener("online", check); document.removeEventListener("visibilitychange", check); };
+  }, []);
+
+  // The storage guard fired -- a save was blocked because the cloud moved ahead.
+  useEffect(() => {
+    const onStale = () => setStaleNotice(true);
+    window.addEventListener("planar:stale", onStale);
+    return () => window.removeEventListener("planar:stale", onStale);
+  }, []);
 
   // Last line of defense: if the tab is closed while the latest changes
   // haven't reached the cloud, the browser asks for confirmation first.
@@ -4242,6 +4281,38 @@ function App() {
     <div style={{height:"100vh",display:"flex",flexDirection:"column",background:"var(--bg)",color:"var(--txt)",overflow:"hidden"}}>
 
       {/* HEADER */}
+      {offlineFallback && (
+        <div style={{background:"#fef2f2",borderBottom:"1px solid #fecaca",color:"#991b1b",padding:"7px 14px",
+          display:"flex",alignItems:"center",gap:10,fontSize:12.5,lineHeight:1.45,flexShrink:0,zIndex:31}}>
+          <span style={{fontSize:14,flexShrink:0}}>⚠</span>
+          <span style={{flex:1}}>
+            <strong>Cloud unreachable — showing the offline copy embedded in this file.</strong>{" "}
+            It may be out of date, and changes will not save. Fix the connection, then reload.
+          </span>
+          <button onClick={()=>window.location.reload()}
+            style={{flexShrink:0,cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,
+              background:"#fff",border:"1px solid #fca5a5",color:"#991b1b",borderRadius:5,padding:"4px 12px"}}>
+            Reload
+          </button>
+        </div>
+      )}
+      {staleNotice && !offlineFallback && (
+        <div style={{background:"#fffbeb",borderBottom:"1px solid #fde68a",color:"#92400e",padding:"7px 14px",
+          display:"flex",alignItems:"center",gap:10,fontSize:12.5,lineHeight:1.45,flexShrink:0,zIndex:31}}>
+          <span style={{fontSize:14,flexShrink:0}}>&#8635;</span>
+          <span style={{flex:1}}>
+            <strong>A newer version was saved on another device.</strong>{" "}
+            {saveStatus==="saved"
+              ? "Reload to load the latest."
+              : "You have unsaved changes here -- reloading replaces them with the other device's version. Your copy is kept in Version History either way."}
+          </span>
+          <button onClick={()=>window.location.reload()}
+            style={{flexShrink:0,cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,
+              background:"#fff",border:"1px solid #fcd34d",color:"#92400e",borderRadius:5,padding:"4px 12px"}}>
+            Reload
+          </button>
+        </div>
+      )}
       <div className="app-header" style={{minHeight:46,background:"#fff",borderBottom:"1px solid var(--bd2)",display:"flex",alignItems:"center",flexWrap:"wrap",rowGap:6,columnGap:8,padding:"6px 14px",flexShrink:0,zIndex:30}}>
 
         {/* Logo */}
@@ -8882,6 +8953,14 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
   const SANITY_MIN_TASKS = 20;
   const SANITY_DROP_RATIO = 0.5;
 
+  // -- Concurrency guard -- a per-tab "version stamp" so a stale tab can't
+  // silently overwrite newer data another device saved. The stamp (__rev) lives
+  // inside the JSON value; this tab remembers the rev it loaded or last wrote
+  // (knownRev[k]) and refuses any auto-save once the cloud has moved past it.
+  const knownRev = {};
+  const staleSnapped = {};
+  const revOf = (p) => (p && typeof p.__rev === "number") ? p.__rev : 0;
+
   const countTasks = (parsed) => {
     try {
       if (!parsed || !parsed.projects) return 0;
@@ -8942,10 +9021,15 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
     get: async (k) => {
       try {
         const { data, error } = await sb.from(TABLE).select("value").eq("key", k).single();
-        if (error || !data) return null;
+        if (error || !data) {
+          // PGRST116 = "no rows" — a clean empty table, not an outage
+          if (error && error.code !== "PGRST116") window.__planarCloudError = true;
+          return null;
+        }
         const val = typeof data.value === "string" ? data.value : JSON.stringify(data.value);
+        try { knownRev[k] = revOf(typeof data.value === "string" ? JSON.parse(data.value) : data.value); } catch { knownRev[k] = 0; }
         return { key: k, value: val };
-      } catch { return null; }
+      } catch { window.__planarCloudError = true; return null; }
     },
     set: async (k, v, opts = {}) => {
       try {
@@ -8956,32 +9040,57 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
         const isAuto = label === "auto";
         const skipSanity = !!opts.skipSanity;
 
-        // Layer 2: pre-save sanity check (auto-saves only — manual labels are trusted)
-        if (isAuto && !skipSanity && parsed && parsed.projects) {
+        // Read the current cloud row ONCE -- used for both the concurrency guard
+        // (Layer 0) and the task-drop sanity check (Layer 2). If the read fails,
+        // cloudRev stays null and we fail "open" (let the save proceed).
+        let cloudRev = null, oldParsed = null;
+        if (parsed && typeof parsed === "object" && parsed.projects) {
           try {
             const cur = await sb.from(TABLE).select("value").eq("key", k).single();
             if (cur.data && cur.data.value) {
-              const oldParsed = typeof cur.data.value === "string" ? JSON.parse(cur.data.value) : cur.data.value;
-              const oldN = countTasks(oldParsed);
-              const newN = countTasks(parsed);
-              if (oldN > SANITY_MIN_TASKS && newN < oldN * SANITY_DROP_RATIO) {
-                // Force an emergency snapshot of the OLD data and abort silent overwrite
-                await _snapshot(k, oldParsed, "safety-block", JSON.stringify(oldParsed).length);
-                console.error(`[planar safety] Refused save: tasks would drop ${oldN} → ${newN}. Old data snapshotted as 'safety-block'.`);
-                if (typeof showToast === "function") {
-                  showToast(`Save blocked — tasks would drop ${oldN}→${newN}. Old state backed up.`, { type: "error", duration: 6000 });
-                }
-                return null;
-              }
+              oldParsed = typeof cur.data.value === "string" ? JSON.parse(cur.data.value) : cur.data.value;
+              cloudRev = revOf(oldParsed);
+            } else if (cur.error && cur.error.code === "PGRST116") {
+              cloudRev = 0;
             }
-          } catch (e) { /* if sanity check itself fails, fall through to normal save */ }
+          } catch (e) { /* read failed -- leave cloudRev null (fail open) */ }
         }
+
+        // Layer 0: concurrency guard. Auto-saves only -- explicit actions
+        // (restore/import/delete/recascade pass skipSanity) are intentional
+        // overwrites and pass through, becoming the newest version.
+        if (isAuto && !skipSanity && cloudRev != null && knownRev[k] != null && cloudRev > knownRev[k]) {
+          if (!staleSnapped[k]) { staleSnapped[k] = true; await _snapshot(k, parsed, "stale-block", v.length); }
+          console.error("[planar guard] Save blocked: cloud rev " + cloudRev + " is ahead of this tab (" + knownRev[k] + "). Reload to get the latest; your copy is saved as 'stale-block'.");
+          try { window.dispatchEvent(new CustomEvent("planar:stale", { detail: { key: k, cloudRev: cloudRev, knownRev: knownRev[k] } })); } catch {}
+          return null;
+        }
+
+        // Layer 2: pre-save sanity check (auto-saves only -- manual labels trusted)
+        if (isAuto && !skipSanity && oldParsed) {
+          const oldN = countTasks(oldParsed);
+          const newN = countTasks(parsed);
+          if (oldN > SANITY_MIN_TASKS && newN < oldN * SANITY_DROP_RATIO) {
+            await _snapshot(k, oldParsed, "safety-block", JSON.stringify(oldParsed).length);
+            console.error("[planar safety] Refused save: tasks would drop " + oldN + " -> " + newN + ". Old data snapshotted as 'safety-block'.");
+            if (typeof showToast === "function") {
+              showToast("Save blocked -- tasks would drop " + oldN + "->" + newN + ". Old state backed up.", { type: "error", duration: 6000 });
+            }
+            return null;
+          }
+        }
+
+        // Stamp the new version one above whatever the cloud holds (or our basis
+        // if the read failed), then write it.
+        if (parsed && typeof parsed === "object") parsed.__rev = (cloudRev != null ? cloudRev : (knownRev[k] || 0)) + 1;
 
         // Main upsert
         const { error } = await sb.from(TABLE).upsert({ key: k, value: parsed }, { onConflict: "key" });
         if (error) { console.error("Supabase set error:", error); return null; }
+        if (parsed && typeof parsed === "object") knownRev[k] = parsed.__rev;
+        staleSnapped[k] = false;
 
-        // Tell the UI a cloud write landed — drives the green save pulse in the header
+        // Tell the UI a cloud write landed -- drives the green save pulse in the header
         try { window.dispatchEvent(new CustomEvent("planar:cloud-saved", { detail: { key: k } })); } catch {}
 
         // Layer 1: write a history snapshot (throttled for auto)
@@ -8989,7 +9098,6 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
         const shouldSnapshot = !isAuto || (now - lastAutoHistoryAt) >= AUTO_HISTORY_MS;
         if (shouldSnapshot) {
           if (isAuto) lastAutoHistoryAt = now;
-          // Fire-and-forget — don't await
           _snapshot(k, parsed, label, v.length);
         }
         return { key: k, value: v };
@@ -9030,6 +9138,17 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
         if (error || !data) return { keys: [] };
         return { keys: data.map(r => r.key) };
       } catch { return { keys: [] }; }
+    },
+    // Cheap "has the cloud moved ahead?" check for the live-refresh poll --
+    // pulls only the version stamp, not the whole dataset.
+    checkRemote: async (k) => {
+      try {
+        const { data, error } = await sb.from(TABLE).select("rev:value->>__rev").eq("key", k).single();
+        if (error || !data) return { ok: false };
+        const cloudRev = data.rev == null ? 0 : (parseInt(data.rev, 10) || 0);
+        const kr = knownRev[k] == null ? 0 : knownRev[k];
+        return { ok: true, cloudRev: cloudRev, knownRev: kr, newer: cloudRev > kr };
+      } catch { return { ok: false }; }
     },
   };
 })();
