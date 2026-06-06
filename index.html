@@ -329,7 +329,8 @@ input[type=range]::-moz-range-thumb { width:14px; height:14px; border-radius:50%
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // ── Constants ─────────────────────────────────────────────
-const ROW_H = 24, PPD = 22, TL_H = 30, BUF = 6;
+let ROW_H = 24;
+const PPD = 22, TL_H = 30, BUF = 6;
 // Excel-style fill palette: 5 columns x 4 rows = 20 swatches. Top rows = pastel tints
 // (read well on light grid rows + leave room for text); bottom rows = stronger fills
 // (work well as Gantt-bar accents). Used by the right-click Format toolbar.
@@ -432,7 +433,17 @@ const buildHolidaySet = holidays => {
   for (let y = y0-5; y <= y0+15; y++) HOLIDAY_DEFS.forEach(h => { if(holidays[h.k]) s.add(h.fn(y)); });
   return s;
 };
-const DEFAULT_SETTINGS = {defaultSplit:60, snapDefault:true, holidays:{...DEFAULT_HOLIDAYS}, customHealth:[], healthLabelOverrides:{}};
+const DEFAULT_SETTINGS = {defaultSplit:60, snapDefault:true, holidays:{...DEFAULT_HOLIDAYS}, customHealth:[], healthLabelOverrides:{}, barLabels:{left:"start", right:"end", year:true, nameAlign:"left"}, rowHeight:24};
+// Gantt bar-label helpers — one source of truth for the on-screen chart and the PDF exhibit
+const fmtBarDate = (s, withYear) => { if(!s) return ""; const d = new Date(s+"T12:00:00"); return isNaN(d) ? "" : `${d.getMonth()+1}/${d.getDate()}` + (withYear===false ? "" : `/${String(d.getFullYear()).slice(2)}`); };
+const barLabelText = (t, field, withYear) => {
+  if(!field || field==="none") return "";
+  if(field==="start") return fmtBarDate(t.start, withYear);
+  if(field==="end")   return fmtBarDate(t.end, withYear);
+  if(field==="owner") return t.responsibleParty || "";
+  if(field==="pct")   return `${t.percentComplete||0}%`;
+  return "";
+};
 // Initialize with defaults
 HOLIDAY_SET = buildHolidaySet(DEFAULT_HOLIDAYS);
 
@@ -2777,6 +2788,7 @@ function App() {
   const [selRange,      setSelRange]      = useState(null); // {r1,r2,c1,c2} — row/col indices into flatTasks/COLS
   const [selectedColIdx, setSelectedColIdx] = useState(0);
   const [goToFocus,      setGoToFocus]      = useState(null); // {taskId, n} — grid scrolls to + pulses this row after a cross-view jump
+  const [formatOpen, setFormatOpen] = useState(false);
   const [settingsOpen,    setSettingsOpen]    = useState(false);
   const [automationOpen,  setAutomationOpen]  = useState(false);
   const [contactsOpen,    setContactsOpen]    = useState(false);
@@ -2993,6 +3005,7 @@ function App() {
     attemptCloudSave(data);
     // Rebuild holiday set whenever settings change
     HOLIDAY_SET = buildHolidaySet(data.settings?.holidays || DEFAULT_HOLIDAYS);
+    ROW_H = Math.min(34, Math.max(20, data.settings?.rowHeight || 24));
     rebuildHEALTH(data.settings?.customHealth || [], data.settings?.healthLabelOverrides || {});
     // Recascade all task dates when holidays change
     const holKey = JSON.stringify(data.settings?.holidays);
@@ -4232,7 +4245,7 @@ function App() {
       <div className="app-header" style={{minHeight:46,background:"#fff",borderBottom:"1px solid var(--bd2)",display:"flex",alignItems:"center",flexWrap:"wrap",rowGap:6,columnGap:8,padding:"6px 14px",flexShrink:0,zIndex:30}}>
 
         {/* Logo */}
-        <svg height="26" viewBox="0 0 220 52" xmlns="http://www.w3.org/2000/svg" style={{flexShrink:0,marginRight:14,display:"block"}}>
+        <svg height="26" viewBox="0 0 196 52" xmlns="http://www.w3.org/2000/svg" style={{flexShrink:0,marginRight:8,display:"block"}}>
           <g transform="translate(0,6)">
             <rect x="0"  y="0"  width="44" height="7"  rx="2" fill="#4f46e5"/>
             <rect x="10" y="13" width="33" height="7"  rx="2" fill="#4f46e5"/>
@@ -4250,7 +4263,7 @@ function App() {
           {[["reports","Dashboard"],["projects","Projects"]].map(([s,label]) => (
             <button key={s} onClick={()=>setData(d=>({...d,section:s}))}
               style={{border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:section===s?600:500,
-                letterSpacing:".01em",padding:"5px 16px",borderRadius:5,transition:"all .15s",
+                letterSpacing:".01em",padding:"5px 12px",borderRadius:5,transition:"all .15s",
                 background:section===s?"#fff":"transparent",
                 color:section===s?"var(--amber)":"var(--mut)",
                 boxShadow:section===s?"0 1px 3px rgba(0,0,0,0.12)":"none"}}>
@@ -4269,11 +4282,11 @@ function App() {
 
         {/* View switcher — hidden while reviewing (review is grid-only; prevents losing review state on remount) */}
         {section === "projects" && !reviewOpen && (
-          <div className="hdr-view" style={{display:"flex",background:"#f0f0f0",borderRadius:7,padding:"3px",gap:2,marginLeft:10,flexShrink:0}}>
+          <div className="hdr-view" style={{display:"flex",background:"#f0f0f0",borderRadius:7,padding:"3px",gap:2,marginLeft:8,flexShrink:0}}>
             {[["grid","Grid"],["split","Split"],["gantt","Gantt"]].map(([v,label]) => (
               <button key={v} onClick={()=>setData(d=>({...d,view:v}))}
                 style={{border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:data.view===v?600:500,
-                  letterSpacing:".01em",padding:"5px 16px",borderRadius:5,transition:"all .15s",
+                  letterSpacing:".01em",padding:"5px 12px",borderRadius:5,transition:"all .15s",
                   background:data.view===v?"#fff":"transparent",
                   color:data.view===v?"var(--amber)":"var(--mut)",
                   boxShadow:data.view===v?"0 1px 3px rgba(0,0,0,0.12)":"none"}}>
@@ -4294,13 +4307,15 @@ function App() {
               setReviewOpen(opening);
             }} title="Review suggested updates from forwarded emails"
             className="hdr-review"
-            style={{marginLeft:10,flexShrink:0,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,
-              letterSpacing:".01em",display:"flex",alignItems:"center",gap:7,padding:"5px 13px",borderRadius:7,transition:"all .15s",
+            style={{marginLeft:8,flexShrink:0,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,
+              letterSpacing:".01em",display:"flex",alignItems:"center",gap:6,padding:"5px 9px",borderRadius:7,transition:"all .15s",
               border: reviewOpen ? "1px solid var(--amber)" : "1px solid var(--bd2)",
               background: reviewOpen ? "#eef2ff" : "var(--surf)",
               color: (reviewOpen || reviewRows.length) ? "var(--amber)" : "var(--mut)"}}>
-            <i className="ti ti-inbox" style={{fontSize:16}}/>
-            Review
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
+              <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+              <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+            </svg>
             {reviewRows.length > 0 && (
               <span style={{fontSize:11,fontWeight:700,color:"#fff",background:"var(--amber)",borderRadius:20,
                 padding:"1px 7px",minWidth:18,textAlign:"center",lineHeight:1.5}}>{reviewRows.length}</span>
@@ -4312,7 +4327,7 @@ function App() {
         <div style={{flex:1}} />
 
         {/* Right action group — desktop: all buttons inline; mobile: overflow menu */}
-        <div className="hdr-actions" style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,marginLeft:"auto"}}>
+        <div className="hdr-actions" style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,marginLeft:"auto"}}>
 
           {isMobile ? (
             /* MOBILE: single overflow button containing Download/Import/Auto-Save */
@@ -4376,12 +4391,22 @@ function App() {
               )}
             </div>
           ) : (<>
+          {section==="projects" && (
+            <button className={formatOpen ? "btn act" : "btn"} title="Format — row height & bar labels"
+              onClick={()=>{setFormatOpen(o=>!o); setSettingsOpen(false); setAutomationOpen(false); setContactsOpen(false);}}
+              style={{padding:"0 7px",height:21,display:"flex",alignItems:"center",marginRight:5}}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+                <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+              </svg>
+            </button>
+          )}
           {/* Zoom — only in split/gantt */}
           {section==="projects" && (data.view==="split"||data.view==="gantt") && (
-            <div style={{display:"flex",alignItems:"center",gap:1,paddingRight:8,borderRight:"1px solid var(--bd2)"}}>
-              <button className="btn" style={{padding:"2px 5px",fontSize:14,lineHeight:1.2,border:"1px solid var(--bd2)"}} title="Zoom out" onClick={()=>setGanttPPD(z=>Math.max(1,Math.floor(z/1.35)))}>−</button>
-              <span style={{fontSize:11,color:"var(--mut)",width:36,textAlign:"center",userSelect:"none"}}>{Math.round(ganttPPD/6*100)}%</span>
-              <button className="btn" style={{padding:"2px 5px",fontSize:14,lineHeight:1.2,border:"1px solid var(--bd2)"}} title="Zoom in" onClick={()=>setGanttPPD(z=>Math.min(80,Math.ceil(z*1.35)))}>+</button>
+            <div style={{display:"flex",alignItems:"center",gap:1,paddingRight:5,borderRight:"1px solid var(--bd2)"}}>
+              <button className="btn" style={{padding:"0 6px",fontSize:13,height:21,lineHeight:1,display:"flex",alignItems:"center",border:"1px solid var(--bd2)"}} title="Zoom out" onClick={()=>setGanttPPD(z=>Math.max(1,Math.floor(z/1.35)))}>−</button>
+              <span style={{fontSize:11,color:"var(--mut)",width:30,textAlign:"center",userSelect:"none"}}>{Math.round(ganttPPD/6*100)}%</span>
+              <button className="btn" style={{padding:"0 6px",fontSize:13,height:21,lineHeight:1,display:"flex",alignItems:"center",border:"1px solid var(--bd2)"}} title="Zoom in" onClick={()=>setGanttPPD(z=>Math.min(80,Math.ceil(z*1.35)))}>+</button>
             </div>
           )}
 
@@ -4389,9 +4414,8 @@ function App() {
           <div style={{position:"relative"}}>
             {dlOpen && <div style={{position:"fixed",inset:0,zIndex:998}} onClick={()=>setDlOpen(false)} />}
             <button className="btn" onClick={()=>setDlOpen(o=>!o)} title="Export — PDF exhibit or web snapshot"
-              style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-              Export
+              style={{display:"flex",alignItems:"center",gap:4,padding:"0 8px",height:21,lineHeight:1}}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
               <span style={{fontSize:8,opacity:.5}}>▾</span>
             </button>
             {dlOpen && (
@@ -4440,7 +4464,7 @@ function App() {
 
 
           {/* Version History — icon-only; tooltip names it */}
-          <button data-testid="open-history-desktop" onClick={()=>{setHistoryOpen(true); setSettingsOpen(false); setAutomationOpen(false); setContactsOpen(false);}}
+          <button data-testid="open-history-desktop" onClick={()=>{setHistoryOpen(true); setSettingsOpen(false); setAutomationOpen(false); setContactsOpen(false); setFormatOpen(false);}}
             title="Version history — browse & restore snapshots"
             className={historyOpen ? "btn act" : "btn"}
             style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px"}}>
@@ -4451,7 +4475,7 @@ function App() {
           </button>
 
           {/* Contacts — icon-only; tooltip names it */}
-          <button onClick={()=>{setContactsOpen(o=>!o); setSettingsOpen(false); setAutomationOpen(false);}} title="Contacts"
+          <button onClick={()=>{setContactsOpen(o=>!o); setSettingsOpen(false); setAutomationOpen(false); setFormatOpen(false);}} title="Contacts"
             className={contactsOpen ? "btn act" : "btn"}
             style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px"}}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -4461,9 +4485,9 @@ function App() {
           </button>
 
           {/* Automation */}
-          <button onClick={()=>{setAutomationOpen(o=>!o); setSettingsOpen(false); setContactsOpen(false);}} title="Automation rules"
+          <button onClick={()=>{setAutomationOpen(o=>!o); setSettingsOpen(false); setContactsOpen(false); setFormatOpen(false);}} title="Automation rules"
             className={automationOpen ? "btn act" : "btn"}
-            style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}>
+            style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"0 9px",height:21,lineHeight:1}}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
               <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
             </svg>
@@ -4471,13 +4495,10 @@ function App() {
           </button>
 
           {/* Settings */}
-          <button onClick={()=>{setSettingsOpen(o=>!o); setAutomationOpen(false); setContactsOpen(false);}} title="Settings"
-            style={{background:settingsOpen?"#eef2ff":"none",border:"none",cursor:"pointer",
-              fontFamily:"inherit",padding:"5px 7px",borderRadius:5,lineHeight:1,
-              color:settingsOpen?"var(--amber)":"var(--mut)",transition:"background .12s,color .12s"}}
-            onMouseEnter={e=>{if(!settingsOpen){e.currentTarget.style.background="#f0f0f0";e.currentTarget.style.color="var(--txt)";}}}
-            onMouseLeave={e=>{if(!settingsOpen){e.currentTarget.style.background="none";e.currentTarget.style.color="var(--mut)";}}}
-          ><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
+          <button onClick={()=>{setSettingsOpen(o=>!o); setAutomationOpen(false); setContactsOpen(false); setFormatOpen(false);}} title="Settings"
+            className={settingsOpen ? "btn act" : "btn"}
+            style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"3px 8px"}}
+          ><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
               <path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
               <circle cx="12" cy="12" r="3"/>
             </svg></button>
@@ -4500,6 +4521,7 @@ function App() {
       </div>
 
       {settingsOpen    && <SettingsPanel    data={data} setData={setData} onClose={()=>setSettingsOpen(false)} />}
+      {formatOpen      && <FormatPanel      data={data} setData={setData} onClose={()=>setFormatOpen(false)} />}
       {automationOpen  && <AutomationPanel  data={data} setData={setData} onClose={()=>setAutomationOpen(false)} />}
       {contactsOpen    && <ContactsPanel    data={data} setData={setData} onClose={()=>setContactsOpen(false)} />}
       {historyOpen     && <HistoryPanel     data={data} setData={setData} exportJSON={exportJSON} importJSON={importJSON} onClose={()=>setHistoryOpen(false)} />}
@@ -4629,7 +4651,7 @@ function ProjDropdown({data, setData, addProject, setProjCtx, breadcrumb=false})
              fontSize:12,fontWeight:600,color:"var(--txt)"}
           : {display:"flex",alignItems:"center",gap:9,cursor:"pointer",fontFamily:"inherit",
              background:open?"#eef2ff":"transparent",border:`1px solid ${open?"#c7d2fe":"transparent"}`,
-             borderRadius:7,padding:"4px 10px",maxWidth:300,minWidth:80,
+             borderRadius:7,padding:"4px 10px",maxWidth:230,minWidth:80,
              transition:"background .15s,border-color .15s"}}
         onClick={toggle}
         onMouseEnter={e=>{ if(!breadcrumb && !open) e.currentTarget.style.background="var(--surf)"; }}
@@ -6585,31 +6607,43 @@ function GanttView({tasks, updateTask, pxPerDay, onZoomChange, scrollRef, onScro
                 {(() => { return null; })()}
                 {isMilestone ? (<>
                   {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,transform:"translateX(-50%)",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
-                  <div style={{position:"absolute",left:bx-6,top:11,width:12,height:12,transform:"rotate(45deg)",background:task.rowColor||h.ganttBar,border:task.rowColor?"1px solid rgba(0,0,0,0.25)":"none",borderRadius:2,zIndex:5}} />
+                  <div style={{position:"absolute",left:bx-3,top:ROW_H-10.5,width:6,height:6,transform:"rotate(45deg)",background:task.rowColor||h.ganttBar,border:task.rowColor?"1px solid rgba(0,0,0,0.25)":"none",zIndex:5}} />
+                  {(() => { const bl=settings?.barLabels; if(!bl) return null;
+                    const L=barLabelText(task,bl.left,bl.year), R=barLabelText(task,bl.right,bl.year);
+                    return (<>
+                      {L && <span style={{position:"absolute",left:bx-8,transform:"translateX(-100%)",top:ROW_H-11.5,fontSize:8,color:"#6b7280",whiteSpace:"nowrap",pointerEvents:"none",zIndex:6,fontFamily:"'Inter',system-ui,sans-serif"}}>{L}</span>}
+                      {R && <span style={{position:"absolute",left:bx+8,top:ROW_H-11.5,fontSize:8,color:"#6b7280",whiteSpace:"nowrap",pointerEvents:"none",zIndex:6,fontFamily:"'Inter',system-ui,sans-serif"}}>{R}</span>}
+                    </>); })()}
                 </>) : isSummary ? (<>
-                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
-                  <div style={{position:"absolute",left:bx,width:bw,top:14,height:9,zIndex:5}}>
+                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; const ctr=settings?.barLabels?.nameAlign==="center"; return <span style={{position:"absolute",left:ctr?bx+bw/2:bx,transform:ctr?"translateX(-50%)":"none",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
+                  <div style={{position:"absolute",left:bx,width:bw,top:ROW_H-10,height:9,zIndex:5}}>
                     <div style={{position:"absolute",left:0,right:0,top:0,height:5,background:task.rowColor||h.ganttBar,border:task.rowColor?"1px solid rgba(0,0,0,0.2)":"none",boxSizing:"border-box"}} />
                     <div style={{position:"absolute",left:0,top:0,height:5,width:`${Math.min(100,progressMap[task.id]||0)}%`,background:"rgba(0,0,0,0.22)"}} />
                     <div style={{position:"absolute",left:0,top:5,width:0,height:0,borderTop:`5px solid ${task.rowColor||h.ganttBar}`,borderRight:"5px solid transparent"}} />
                     <div style={{position:"absolute",right:0,top:5,width:0,height:0,borderTop:`5px solid ${task.rowColor||h.ganttBar}`,borderLeft:"5px solid transparent"}} />
                   </div>
                 </>) : (<>
-                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; return <span style={{position:"absolute",left:bx,top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
+                  {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; const ctr=settings?.barLabels?.nameAlign==="center"; return <span style={{position:"absolute",left:ctr?bx+bw/2:bx,transform:ctr?"translateX(-50%)":"none",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
+                  {(() => { const bl=settings?.barLabels; if(!bl) return null;
+                    const L=barLabelText(task,bl.left,bl.year), R=barLabelText(task,bl.right,bl.year);
+                    return (<>
+                      {L && <span style={{position:"absolute",left:bx-4,transform:"translateX(-100%)",top:ROW_H-11.5,fontSize:8,color:"#6b7280",whiteSpace:"nowrap",pointerEvents:"none",zIndex:6,fontFamily:"'Inter',system-ui,sans-serif"}}>{L}</span>}
+                      {R && <span style={{position:"absolute",left:bx+bw+4,top:ROW_H-11.5,fontSize:8,color:"#6b7280",whiteSpace:"nowrap",pointerEvents:"none",zIndex:6,fontFamily:"'Inter',system-ui,sans-serif"}}>{R}</span>}
+                    </>); })()}
                   {/* Outline/stripe styles are reserved for status semantics (unscheduled / paused); an
                       explicit per-task fillColor override switches to a solid bar so the user's choice
                       isn't visually competing with status hatching. */}
                   {task.rowColor ? (
-                    <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,background:task.rowColor,border:"1px solid rgba(0,0,0,0.2)",boxSizing:"border-box",zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
+                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,background:task.rowColor,border:"1px solid rgba(0,0,0,0.2)",boxSizing:"border-box",zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
                       <div style={{width:`${task.percentComplete}%`,background:"rgba(0,0,0,0.18)",flexShrink:0}} />
                     </div>
                   ) : h.ganttStyle === "outline" ? (
-                    <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,background:"transparent",border:"1.5px dashed #94a3b8",borderRadius:1,zIndex:5}} />
+                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,background:"transparent",border:"1.5px dashed #94a3b8",borderRadius:1,zIndex:5}} />
                   ) : h.ganttStyle === "stripe" ? (
-                    <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,zIndex:5,overflow:"hidden",borderRadius:1,
+                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,zIndex:5,overflow:"hidden",borderRadius:1,
                       background:`repeating-linear-gradient(45deg,#9ca3af 0px,#9ca3af 2px,#d1d5db 2px,#d1d5db 6px)`}} />
                   ) : (
-                    <div style={{position:"absolute",left:bx,top:13,height:7,width:bw,background:h.ganttBar,zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
+                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,background:h.ganttBar,zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
                       <div style={{width:`${task.percentComplete}%`,background:"rgba(0,0,0,0.18)",flexShrink:0}} />
                     </div>
                   )}
@@ -6628,7 +6662,19 @@ function GanttView({tasks, updateTask, pxPerDay, onZoomChange, scrollRef, onScro
 function SettingsPanel({data, setData, onClose}) {
   const s = data.settings || DEFAULT_SETTINGS;
   const upd = patch => setData(d => ({...d, settings:{...d.settings,...patch}}));
-  const updHol = (k, v) => setData(d => ({...d, settings:{...d.settings, holidays:{...d.settings.holidays,[k]:v}}}));
+  const updHol = (k, v) => setData(d => {
+    const holidays = {...d.settings.holidays, [k]: v};
+    HOLIDAY_SET = buildHolidaySet(holidays);
+    const newProjects = {};
+    Object.entries(d.projects || {}).forEach(([pid, proj]) => {
+      let tasks = (proj.tasks || []).map(t => ({...t}));   // clone — never mutate prior state
+      tasks = cascadeDates(tasks);                          // respects pinnedStart
+      tasks = rollupParentDates(tasks);
+      newProjects[pid] = {...proj, tasks};
+    });
+    return {...d, settings:{...d.settings, holidays}, projects: newProjects};
+  });
+  const pinCount = Object.values(data.projects || {}).reduce((n, p) => n + (p.tasks || []).filter(t => t.pinnedStart).length, 0);
   const [open, setOpen] = useState({view: true, holidays: false, cf: false});
   const tog = k => setOpen(p => ({...p, [k]: !p[k]}));
   // Fix #10: close on Escape (consistent with other modals/pickers)
@@ -6722,7 +6768,10 @@ function SettingsPanel({data, setData, onClose}) {
 
       <div style={{marginTop: open.view ? 6 : 2}}>
         <SectionHdr id="holidays" title="Holidays" />
-        {open.holidays && (
+        {open.holidays && (<>
+          <div style={{fontSize:10,color:"var(--mut)",lineHeight:1.45,margin:"0 0 6px"}}>
+            Toggling a holiday recalculates every schedule immediately. Pinned start dates stay put — computed finish dates and downstream tasks shift.
+          </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"2px 4px",paddingBottom:4}}>
             {HOLIDAY_DEFS.map(h => {
               const on = !!(s.holidays||{})[h.k];
@@ -6743,9 +6792,144 @@ function SettingsPanel({data, setData, onClose}) {
               );
             })}
           </div>
+        </>)}
+
+        <SectionHdr id="schedule" title="Schedule" />
+        {open.schedule && (
+          <div style={{paddingBottom:6}}>
+            <div style={{fontSize:11,color:"var(--mut)",lineHeight:1.5,marginBottom:8}}>
+              Editing a date directly <strong>pins</strong> it — the dependency cascade stops moving that task.
+              Recascade removes every pin in every project and recomputes all dates from predecessor logic.
+              A snapshot is saved first, so it can be undone from Version History.
+            </div>
+            <div style={{fontSize:11,color:"var(--txt)",marginBottom:8}}>
+              Currently pinned: <strong>{pinCount}</strong> task{pinCount===1?"":"s"} across all projects
+            </div>
+            <button className="btn"
+              title="Strip all pinned dates and recalculate everything from predecessor logic"
+              style={{display:"flex",alignItems:"center",gap:6,fontSize:11,padding:"4px 11px",
+                borderColor:"#fca5a5",color:"#b91c1c"}}
+              onClick={()=>{
+                // Guardrail: confirm + snapshot before destructive recascade
+                if (!window.confirm("Strip all pinned dates across all projects and recalculate from predecessor logic?\n\nA backup snapshot will be saved — you can restore from Version History if needed.")) return;
+                setData(d => {
+                  try { window.storage.set("hs-v1", JSON.stringify(d), { label: "pre-recascade", skipSanity: true }); } catch {}
+                  HOLIDAY_SET = buildHolidaySet(d.settings?.holidays || DEFAULT_HOLIDAYS);
+                  const newProjects = {};
+                  Object.entries(d.projects).forEach(([pid, proj]) => {
+                    let tasks = proj.tasks.map(({pinnedStart, _pinStart, __wasDirectEdit, ...t}) => t);
+                    tasks = cascadeDates(tasks);
+                    tasks = rollupParentDates(tasks);
+                    newProjects[pid] = {...proj, tasks};
+                  });
+                  return {...d, _pinnedClean: true, projects: newProjects};
+                });
+                onClose();
+              }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+              </svg>
+              Recascade all projects
+            </button>
+          </div>
         )}
       </div>
 
+    </div>
+  );
+}
+
+// ── FormatPanel — how the chart looks (row height, bar labels). Settings stays behavioral. ──
+function FormatPanel({data, setData, onClose}) {
+  const s = data.settings || {};
+  const upd = patch => setData(d => ({...d, settings:{...d.settings, ...patch}}));
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const Toggle = ({on, onChange}) => (
+    <span onClick={e=>{e.stopPropagation();onChange(!on);}} style={{width:28,height:15,borderRadius:8,background:on?"var(--amber)":"var(--bd2)",position:"relative",display:"inline-block",cursor:"pointer",transition:"background .15s",flexShrink:0}}>
+      <span style={{width:11,height:11,borderRadius:"50%",background:"#fff",boxShadow:"0 1px 3px rgba(0,0,0,.2)",position:"absolute",top:2,left:on?15:2,transition:"left .15s"}} />
+    </span>
+  );
+  const SegBtn = ({options, value, onChange}) => (
+    <div style={{display:"inline-flex",background:"#f0f0f0",borderRadius:6,padding:2,gap:2}}>
+      {options.map(o=>(
+        <button key={String(o.v)} onClick={()=>onChange(o.v)}
+          style={{border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:600,padding:"3px 10px",borderRadius:4,
+            background:value===o.v?"#fff":"transparent",color:value===o.v?"var(--amber)":"var(--mut)",
+            boxShadow:value===o.v?"0 1px 2px rgba(0,0,0,.12)":"none",transition:"all .12s"}}>{o.l}</button>
+      ))}
+    </div>
+  );
+  const rh = Math.min(34, Math.max(20, s.rowHeight || 24));
+  return (
+    <div style={{position:"fixed",top:48,right:12,width:300,background:"#fff",border:"1px solid var(--bd2)",
+      borderRadius:8,boxShadow:"0 4px 20px rgba(0,0,0,0.14)",zIndex:9999,padding:"0 16px 14px",
+      maxHeight:"calc(100vh - 70px)",overflowY:"auto",fontFamily:"inherit"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 0 8px",borderBottom:"1px solid var(--bd)",position:"sticky",top:0,background:"#fff",zIndex:2}}>
+        <span style={{fontSize:13,fontWeight:700,color:"var(--txt)"}}>Format</span>
+        <button onClick={onClose} title="Close" style={{background:"none",border:"none",cursor:"pointer",fontSize:15,color:"var(--mut)",padding:"2px 4px",lineHeight:1}}>✕</button>
+      </div>
+
+      <div style={{padding:"8px 0 2px"}}>
+        <span style={{fontSize:12,color:"var(--txt)",display:"block",marginBottom:6}}>Row height — grid &amp; Gantt</span>
+        <div style={{position:"relative",height:20,display:"flex",alignItems:"center"}}>
+          <div style={{position:"absolute",left:0,right:0,height:4,borderRadius:2,background:"var(--bd2)",overflow:"hidden",pointerEvents:"none"}}>
+            <div style={{width:`${((rh-20)/(34-20))*100}%`,height:"100%",background:"var(--amber)",transition:"width .05s"}} />
+          </div>
+          <input type="range" min={20} max={34} value={rh}
+            onChange={e=>upd({rowHeight:+e.target.value})}
+            style={{width:"100%",appearance:"none",WebkitAppearance:"none",background:"transparent",
+              margin:0,cursor:"pointer",position:"relative",zIndex:1}} />
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:2}}>
+          <span style={{fontSize:10,color:"var(--mut)"}}>20px</span>
+          <span style={{fontSize:12,fontWeight:600,color:"var(--amber)"}}>{rh}px</span>
+          <span style={{fontSize:10,color:"var(--mut)"}}>34px</span>
+        </div>
+      </div>
+
+      <div style={{padding:"10px 0 2px",borderTop:"1px solid var(--bd)",marginTop:8}}>
+        <span style={{fontSize:12,color:"var(--txt)",display:"block",marginBottom:5}}>Gantt bar labels</span>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+          <thead><tr>
+            <th style={{textAlign:"left",padding:"3px 6px",borderBottom:"1px solid var(--bd)",fontSize:9,fontWeight:700,color:"var(--mut)",letterSpacing:".06em",textTransform:"uppercase"}}>Position</th>
+            <th style={{textAlign:"left",padding:"3px 6px",borderBottom:"1px solid var(--bd)",fontSize:9,fontWeight:700,color:"var(--mut)",letterSpacing:".06em",textTransform:"uppercase"}}>Field</th>
+          </tr></thead>
+          <tbody>
+            {[["left","Left of bar"],["right","Right of bar"]].map(([k,label])=>(
+              <tr key={k}>
+                <td style={{padding:"4px 6px",borderBottom:"1px solid var(--bd)",color:"var(--txt)"}}>{label}</td>
+                <td style={{padding:"2px 4px",borderBottom:"1px solid var(--bd)"}}>
+                  <select value={(s.barLabels||{})[k]||"none"}
+                    onChange={e=>upd({barLabels:{...(s.barLabels||{}),[k]:e.target.value}})}
+                    style={{width:"100%",background:"var(--bg)",border:"1px solid var(--bd2)",borderRadius:3,padding:"3px 6px",fontSize:11,color:"var(--txt)",fontFamily:"inherit",outline:"none",cursor:"pointer"}}>
+                    <option value="none">None</option>
+                    <option value="start">Start date</option>
+                    <option value="end">End date</option>
+                    <option value="owner">Owner</option>
+                    <option value="pct">% complete</option>
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 2px 0"}}>
+          <span style={{fontSize:12,color:"var(--txt)"}}>Show year in dates</span>
+          <Toggle on={(s.barLabels||{}).year!==false} onChange={v=>upd({barLabels:{...(s.barLabels||{}),year:v}})} />
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 2px 0"}}>
+          <span style={{fontSize:12,color:"var(--txt)"}}>Task name above bar</span>
+          <SegBtn options={[{l:"Left",v:"left"},{l:"Centered",v:"center"}]} value={(s.barLabels||{}).nameAlign||"left"} onChange={v=>upd({barLabels:{...(s.barLabels||{}),nameAlign:v}})} />
+        </div>
+        <div style={{fontSize:10,color:"var(--mut)",marginTop:6,lineHeight:1.4}}>
+          Bar labels show beside task bars and milestones — on screen and in the PDF exhibit. Row height applies on screen; the exhibit keeps its own print density.
+        </div>
+      </div>
     </div>
   );
 }
@@ -7398,33 +7582,6 @@ function MasterView({data, setData, updateTask, setNotesCtx, goToTask}) {
         <span style={{color:"var(--amber)",fontWeight:600,fontSize:13,letterSpacing:".08em"}}>TASK REPORT</span>
         <span style={{background:"#dbeafe",color:"#1d4ed8",borderRadius:8,padding:"1px 8px",fontSize:10}}>{filteredRows.length}</span>
 
-        {/* Force Recascade — strips all pins and reruns cascade, saves to Supabase */}
-        <button title="Strip all pinned dates and recalculate everything from predecessor logic"
-          className="btn"
-          style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}
-          onClick={()=>{
-            // Guardrail: confirm + snapshot before destructive recascade
-            if (!window.confirm("Strip all pinned dates across all projects and recalculate from predecessor logic?\n\nA backup snapshot will be saved — you can restore from Version History if needed.")) return;
-            setData(d => {
-              try { window.storage.set("hs-v1", JSON.stringify(d), { label: "pre-recascade", skipSanity: true }); } catch {}
-              HOLIDAY_SET = buildHolidaySet(d.settings?.holidays || DEFAULT_HOLIDAYS);
-              const newProjects = {};
-              Object.entries(d.projects).forEach(([pid, proj]) => {
-                let tasks = proj.tasks.map(({pinnedStart, _pinStart, __wasDirectEdit, ...t}) => t);
-                tasks = cascadeDates(tasks);
-                tasks = rollupParentDates(tasks);
-                newProjects[pid] = {...proj, tasks};
-              });
-              return {...d, _pinnedClean: true, projects: newProjects};
-            });
-          }}>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-          </svg>
-          Recascade
-        </button>
-
         {/* Health filter pill */}
         <button onClick={()=>setHealthFilter(!masterHealthFilter)}
           style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",borderRadius:12,
@@ -7709,14 +7866,51 @@ function buildGanttSVG(projects, svgWidth, orientation, opts = {}) {
 <line x1="${LABEL_W}" y1="${y}" x2="${LABEL_W}" y2="${y+ROW_H}" stroke="#e0e0e0" stroke-width="0.5"/>`;
       })();
     const barY=y+ROW_H*0.22, barH=ROW_H*0.55, midY=y+ROW_H*0.5;
+    let blText="";
+    if(opts.barLabels && !isParent){
+      const L=barLabelText(t,opts.barLabels.left,opts.barLabels.year), R=barLabelText(t,opts.barLabels.right,opts.barLabels.year);
+      const lx=isMilestone?bx-8:bx-3, rx=isMilestone?bx+8:bx+bw+3;
+      if(L) blText+=`<text x="${lx}" y="${y+ROW_H*0.68}" font-size="6.5" fill="#555" text-anchor="end" font-family="Arial,sans-serif">${escapeHtml(L)}</text>`;
+      if(R) blText+=`<text x="${rx}" y="${y+ROW_H*0.68}" font-size="6.5" fill="#555" font-family="Arial,sans-serif">${escapeHtml(R)}</text>`;
+    }
     return `<rect x="0" y="${y}" width="${svgWidth}" height="${ROW_H}" fill="${bg}"/>
 ${labelHtml}
 ${isMilestone?`<polygon points="${bx},${midY-5} ${bx+5},${midY} ${bx},${midY+5} ${bx-5},${midY}" fill="${color}"/>`
 :isParent?`<rect x="${bx}" y="${barY}" width="${bw}" height="${barH*0.55}" fill="${color}" opacity="0.9"/>
 <polygon points="${bx},${barY+barH*0.55} ${bx+5},${barY+barH}" fill="${color}" opacity="0.9"/>
 <polygon points="${bx+bw},${barY+barH*0.55} ${bx+bw-5},${barY+barH}" fill="${color}" opacity="0.9"/>`
-:`<rect x="${bx}" y="${barY}" width="${bw}" height="${barH}" rx="2" fill="${color}" opacity="0.85"/>`}`;
+:`<rect x="${bx}" y="${barY}" width="${bw}" height="${barH}" rx="2" fill="${color}" opacity="0.85"/>`}${blText}`;
   }).join("");
+  // Dependency connectors — same curved style as the in-app Gantt (cubic bezier,
+  // direction-flipped 32px handles, type colors, dashed). Opacity lifted .55 -> .7 for print.
+  let arrows="";
+  if(opts.showArrows!==false){
+    const DEP_C={FS:"#0969da",SS:"#7c3aed",FF:"#0891b2",SF:"#be185d"};
+    let base=0;
+    for(const p of projects){
+      const ix=new Map();
+      p.tasks.forEach((t,i)=>ix.set(t.id, base+i));
+      for(const t of p.tasks){
+        const preds=Array.isArray(t.predecessors)?t.predecessors:[];
+        for(const pr of preds){
+          if(!pr||!ix.has(pr.id)) continue;
+          const pt=p.tasks[ix.get(pr.id)-base];
+          if(!pt||!pt.start||!pt.end||!t.start||!t.end) continue;
+          const pi=ix.get(pr.id), si=ix.get(t.id);
+          if(pi===si) continue;
+          const type=(pr.type||"FS").toUpperCase();
+          const x1=(type==="SS"||type==="SF")?xOf(pt.start):xOf(pt.end);
+          const x2=(type==="FF"||type==="SF")?xOf(t.end):xOf(t.start);
+          const y1=HEADER_H+pi*ROW_H+ROW_H*0.5, y2=HEADER_H+si*ROW_H+ROW_H*0.5;
+          const aDir=x2>=x1?1:-1;
+          const color=DEP_C[type]||DEP_C.FS;
+          arrows+=`<path class="dep" d="M${x1},${y1} C${x1+32*aDir},${y1} ${x2-32*aDir},${y2} ${x2},${y2}" stroke="${color}" stroke-width="1.2" fill="none" stroke-dasharray="4 3" opacity="0.7"/>`
+            +`<path d="M${x2},${y2} L${x2-5*aDir},${y2-3} L${x2-5*aDir},${y2+3}Z" fill="${color}" opacity="0.7"/>`;
+        }
+      }
+      base+=p.tasks.length;
+    }
+  }
   // Grid lines every month (subtle), labels only at computed density, year boundaries emphasized
   const gridLines=months.map(m=>`<line x1="${m.x}" y1="${HEADER_H}" x2="${m.x}" y2="${svgH}" stroke="${m.mo===0?'#bbb':'#eee'}" stroke-width="${m.mo===0?0.8:0.4}"/>`).join("")
     +visibleMonths.map(m=>`<text x="${m.x+3}" y="15" font-size="7.5" fill="#e8e8e8" font-family="Arial,sans-serif">${m.label}</text>`).join("")
@@ -7732,7 +7926,7 @@ ${isMilestone?`<polygon points="${bx},${midY-5} ${bx+5},${midY} ${bx},${midY+5} 
 <rect width="${svgWidth}" height="${svgH}" fill="#fff"/>
 <rect x="0" y="0" width="${svgWidth}" height="${HEADER_H}" fill="#1a1a1a"/>
 ${taskHeaderText}
-${gridLines}${rows}${todayLine}</svg>`;
+${gridLines}${rows}${arrows}${todayLine}</svg>`;
 }
 
 function buildPDFHtml(cfg, data, forPreview) {
@@ -7791,7 +7985,7 @@ function buildPDFHtml(cfg, data, forPreview) {
       const splitInner=contentPx-2;
       const tableW=Math.min(Math.round(splitInner*0.5), Math.max(280, splitInner - 320));
       const ganttW=splitInner - tableW;
-      const ganttSvg=buildGanttSVG([ganttProj], ganttW, cfg.orientation, {noLabels:true, showToday:cfg.showToday!==false});
+      const ganttSvg=buildGanttSVG([ganttProj], ganttW, cfg.orientation, {noLabels:true, showToday:cfg.showToday!==false, showArrows:cfg.showArrows!==false, barLabels:data.settings?.barLabels});
       bodyHtml+=`<div class="proj-block">${selProjs.length>1?`<div class="proj-name">${escapeHtml(proj.name)}</div>`:""}
         <div class="split-view">
           <div class="split-table" style="width:${tableW}px;flex-shrink:0">
@@ -8103,6 +8297,7 @@ function PDFExportModal({data, activePid, onClose}) {
     columns: (() => { const PRINTABLE=new Set(["id","name","start","end","duration","health","percentComplete","responsibleParty","predecessors"]); const mc=(data.masterCols||[]).filter(k=>PRINTABLE.has(k)); return mc.length>0?mc:["id","name","start","end","duration","health","responsibleParty"]; })(),
     includeGantt: true,
     showToday: true,
+    showArrows: true,
     healthFilter: "all",
     confidential: "",
   });
@@ -8301,6 +8496,9 @@ function PDFExportModal({data, activePid, onClose}) {
             <Row label="Gantt"><Toggle on={cfg.includeGantt} onChange={v=>upd({includeGantt:v})} /></Row>
             {cfg.includeGantt && (
               <Row label="Today line"><Toggle on={cfg.showToday!==false} onChange={v=>upd({showToday:v})} /></Row>
+            )}
+            {cfg.includeGantt && (
+              <Row label="Dep. arrows"><Toggle on={cfg.showArrows!==false} onChange={v=>upd({showArrows:v})} /></Row>
             )}
             </>)}
 
@@ -8694,6 +8892,29 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
     try { return Object.keys(parsed?.projects || {}).length; } catch { return 0; }
   };
 
+  // Retention: keep the newest KEEP_SNAPSHOTS rows per key; prune the rest.
+  // Without this the table grows by a full copy of the dataset every ~30s of
+  // editing, forever — which bloats the database and slows everything down.
+  const KEEP_SNAPSHOTS = 120;
+  let _snapCount = 0;
+  const _prune = async (k) => {
+    try {
+      // Find the timestamp of the (KEEP+1)th-newest snapshot, delete older.
+      const { data, error } = await sb.from(HISTORY_TABLE)
+        .select("created_at").eq("key", k)
+        .order("created_at", { ascending: false })
+        .range(KEEP_SNAPSHOTS, KEEP_SNAPSHOTS);
+      if (error || !data || !data.length) return;
+      const { error: delErr } = await sb.from(HISTORY_TABLE)
+        .delete().eq("key", k).lt("created_at", data[0].created_at);
+      if (delErr && !_prune._warned) {
+        _prune._warned = true;
+        console.warn("history prune blocked (RLS?). Run periodically in SQL editor:",
+          "delete from planar_history where id not in (select id from planar_history order by created_at desc limit " + KEEP_SNAPSHOTS + ");");
+      }
+    } catch {}
+  };
+
   // Insert a history row. Best-effort — fails silently if table doesn't exist
   // or RLS blocks the insert. Never blocks the main save.
   const _snapshot = async (k, parsed, label, byteSize) => {
@@ -8709,6 +8930,8 @@ function NotesModal({task, projectId, updateTask, onClose, initChar}) {
       if (error) {
         // Only warn on first failure per session — table likely doesn't exist yet
         if (!_snapshot._warned) { _snapshot._warned = true; console.warn("history snapshot failed (run setup SQL?):", error.message); }
+      } else if ((++_snapCount % 10) === 1) {
+        _prune(k);   // fire-and-forget, every ~10th snapshot
       }
     } catch (e) {
       if (!_snapshot._warned) { _snapshot._warned = true; console.warn("history snapshot exception:", e); }
