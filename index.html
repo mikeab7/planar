@@ -1574,7 +1574,7 @@ function ContactsPanel({ data, setData, onClose }) {
 }
 
 // ── HistoryPanel — browse / preview / restore snapshots from planar_history ─
-function HistoryPanel({ data, setData, onClose }) {
+function HistoryPanel({ data, setData, onClose, exportJSON, importJSON }) {
   const [rows, setRows]           = useState(null);   // null = loading
   const [previewRow, setPreviewRow] = useState(null);
   const [previewData, setPreviewData] = useState(null); // parsed full snapshot
@@ -1692,6 +1692,22 @@ function HistoryPanel({ data, setData, onClose }) {
             <div style={{fontSize:14,fontWeight:600,color:"var(--txt)"}}>Version History</div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {exportJSON && (
+              <button className="btn" onClick={exportJSON} title="Download a complete offline copy of all data as a .json file"
+                style={{display:"flex",alignItems:"center",gap:5,fontSize:11}}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Backup file
+              </button>
+            )}
+            {importJSON && (
+              <label className="btn" title="Replace current data from a backup .json — current state is snapshotted first"
+                style={{cursor:"pointer",display:"flex",alignItems:"center",gap:5,fontSize:11}}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="17"/></svg>
+                Restore file
+                <input type="file" accept=".json" onChange={e=>{importJSON(e); e.target.value="";}} style={{display:"none"}}/>
+              </label>
+            )}
+            <div style={{width:1,height:16,background:"var(--bd)"}} />
             <button className="btn" onClick={refresh} disabled={busy} title="Refresh">↻</button>
             <button className="btn" onClick={onClose}>Close</button>
           </div>
@@ -1699,7 +1715,7 @@ function HistoryPanel({ data, setData, onClose }) {
 
         {/* Banner */}
         <div style={{padding:"10px 18px",fontSize:11,color:"var(--mut)",background:"#fafbfc",borderBottom:"1px solid var(--bd)",flexShrink:0}}>
-          Snapshots of your data, newest first. Restore reverts to a snapshot; your current state is backed up first as <code style={{background:"#eef2ff",padding:"1px 4px",borderRadius:2,fontSize:10}}>pre-restore</code>.
+          Snapshots of your data, newest first. Restore reverts to a snapshot; your current state is backed up first as <code style={{background:"#eef2ff",padding:"1px 4px",borderRadius:2,fontSize:10}}>pre-restore</code>. For an offline copy, <strong>Backup file</strong> downloads everything as .json — <strong>Restore file</strong> loads one back.
         </div>
 
         {/* Body */}
@@ -4327,15 +4343,8 @@ function App() {
                   <div onClick={()=>{exportHTML();setMobMenuOpen(false);}} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:9}}>
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color:"var(--mut)",flexShrink:0}}><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                     <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>Export Report</span>
-                      <span style={{fontSize:10,color:"var(--mut)"}}>Formatted schedule · .html</span>
-                    </div>
-                  </div>
-                  <div onClick={()=>{exportJSON();setMobMenuOpen(false);}} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:9}}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color:"var(--mut)",flexShrink:0}}><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>Backup Data</span>
-                      <span style={{fontSize:10,color:"var(--mut)"}}>Restore later · .json</span>
+                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>Web Snapshot</span>
+                      <span style={{fontSize:10,color:"var(--mut)"}}>Quick plain task tables · .html</span>
                     </div>
                   </div>
                   <div data-testid="open-history-mobile" onClick={()=>{setHistoryOpen(true);setMobMenuOpen(false);}} style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:9}}>
@@ -4352,15 +4361,6 @@ function App() {
                       <span style={{fontSize:10,color:"var(--mut)"}}>Print-ready exhibit</span>
                     </div>
                   </div>
-                  {/* Import via label/file input */}
-                  <label style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:9}}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color:"var(--mut)",flexShrink:0}}><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="17"/></svg>
-                    <div style={{display:"flex",flexDirection:"column",gap:1}}>
-                      <span style={{fontSize:13,color:"var(--txt)",fontWeight:500}}>Import Backup</span>
-                      <span style={{fontSize:10,color:"var(--mut)"}}>Load .json file</span>
-                    </div>
-                    <input type="file" accept=".json" onChange={(e)=>{importJSON(e);setMobMenuOpen(false);}} style={{display:"none"}}/>
-                  </label>
                   {/* Automation */}
                   <div onClick={()=>{setAutomationOpen(o=>!o);setMobMenuOpen(false);}}
                     style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:9,borderTop:"1px solid var(--bd)"}}>
@@ -4385,39 +4385,30 @@ function App() {
             </div>
           )}
 
-          {/* Download dropdown */}
+          {/* Export menu — deliverables only; data backup/restore lives in Version History */}
           <div style={{position:"relative"}}>
             {dlOpen && <div style={{position:"fixed",inset:0,zIndex:998}} onClick={()=>setDlOpen(false)} />}
-            <button className="btn" onClick={()=>setDlOpen(o=>!o)} title="Download"
-              style={{display:"flex",alignItems:"center",gap:4,fontSize:11,padding:"3px 8px"}}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <button className="btn" onClick={()=>setDlOpen(o=>!o)} title="Export — PDF exhibit or web snapshot"
+              style={{display:"flex",alignItems:"center",gap:5,fontSize:11,padding:"3px 9px"}}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+              Export
               <span style={{fontSize:8,opacity:.5}}>▾</span>
             </button>
             {dlOpen && (
               <div style={{position:"absolute",top:"calc(100% + 5px)",right:0,background:"#fff",border:"1px solid var(--bd2)",borderRadius:7,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999,minWidth:192,padding:"4px 0",overflow:"hidden"}}>
-                <div onClick={()=>{exportHTML();setDlOpen(false);}} style={{padding:"8px 14px",cursor:"pointer",display:"flex",flexDirection:"column",gap:2}} onMouseEnter={e=>e.currentTarget.style.background="#f6f8fa"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                  <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>Export Report</span>
-                  <span style={{fontSize:10,color:"var(--mut)"}}>Formatted schedule · .html</span>
-                </div>
-                <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />
-                <div onClick={()=>{exportJSON();setDlOpen(false);}} style={{padding:"8px 14px",cursor:"pointer",display:"flex",flexDirection:"column",gap:2}} onMouseEnter={e=>e.currentTarget.style.background="#f6f8fa"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                  <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>Backup Data</span>
-                  <span style={{fontSize:10,color:"var(--mut)"}}>Restore later or share · .json</span>
-                </div>
-                <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />
                 <div onClick={()=>{setPdfExportOpen(true);setDlOpen(false);}} style={{padding:"8px 14px",cursor:"pointer",display:"flex",flexDirection:"column",gap:2}} onMouseEnter={e=>e.currentTarget.style.background="#f6f8fa"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                  <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>Export PDF</span>
-                  <span style={{fontSize:10,color:"var(--mut)"}}>Print-ready exhibit or report</span>
+                  <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>PDF / Print Exhibit</span>
+                  <span style={{fontSize:10,color:"var(--mut)"}}>Formatted pages — share or file</span>
+                </div>
+                <div style={{height:1,background:"var(--bd)",margin:"2px 0"}} />
+                <div onClick={()=>{exportHTML();setDlOpen(false);}} style={{padding:"8px 14px",cursor:"pointer",display:"flex",flexDirection:"column",gap:2}} onMouseEnter={e=>e.currentTarget.style.background="#f6f8fa"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <span style={{fontSize:12,color:"var(--txt)",fontWeight:500}}>Web Snapshot</span>
+                  <span style={{fontSize:10,color:"var(--mut)"}}>Quick plain task tables · .html</span>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Import */}
-          <label className="btn" title="Import" style={{cursor:"pointer",display:"flex",alignItems:"center",padding:"3px 8px"}}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="17"/></svg>
-            <input type="file" accept=".json" onChange={importJSON} style={{display:"none"}}/>
-          </label>
 
           <div style={{width:1,height:20,background:"var(--bd2)",flexShrink:0}} />
 
@@ -4511,7 +4502,7 @@ function App() {
       {settingsOpen    && <SettingsPanel    data={data} setData={setData} onClose={()=>setSettingsOpen(false)} />}
       {automationOpen  && <AutomationPanel  data={data} setData={setData} onClose={()=>setAutomationOpen(false)} />}
       {contactsOpen    && <ContactsPanel    data={data} setData={setData} onClose={()=>setContactsOpen(false)} />}
-      {historyOpen     && <HistoryPanel     data={data} setData={setData} onClose={()=>setHistoryOpen(false)} />}
+      {historyOpen     && <HistoryPanel     data={data} setData={setData} exportJSON={exportJSON} importJSON={importJSON} onClose={()=>setHistoryOpen(false)} />}
       {successorPrompt && <SuccessorPromptModal prompt={successorPrompt} updateTask={updateTask} onClose={()=>setSuccessorPrompt(null)} onOpenTask={(pid, taskId)=>{ goToTask(pid, taskId); setSuccessorPrompt(null); }} />}
 
       {/* BODY */}
