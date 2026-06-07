@@ -8013,14 +8013,22 @@ function buildPDFHtml(cfg, data, forPreview) {
   const HC = {gray:{l:"Not Started",c:"#94a3b8"},yellow:{l:"In Progress",c:"#d97706"},red:{l:"Needs Attn.",c:"#dc2626"},green:{l:"Complete",c:"#16a34a"},paused:{l:"Paused",c:"#9ca3af"}};
   const fmtD = s => { if(!s) return ""; const [y,m,d]=s.split("-"); return String(+m).padStart(2,'0')+'/'+String(+d).padStart(2,'0')+'/'+y.slice(2); };
   const getDepth = (tasks,id) => {let dep=0,t=tasks.find(x=>x.id===id);while(t&&t.parentId!==null){dep++;t=tasks.find(x=>x.id===t.parentId);}return Math.min(dep,3);};
-  const cellVal = (t,k,tasks) => {
+  // Collapse state for this exhibit only — keys are "projectId:taskId". Never written back to live tasks.
+  const collapsedSet = new Set(cfg.collapsedIds || []);
+  // A task is hidden when any ancestor is collapsed (walked against the full project list).
+  const visibleTasks = proj => proj.tasks.filter(t => {
+    let pid = t.parentId;
+    while (pid != null) { if (collapsedSet.has(proj.id + ":" + pid)) return false; const par = proj.tasks.find(x => x.id === pid); pid = par ? par.parentId : null; }
+    return true;
+  });
+  const cellVal = (t,k,tasks,projId) => {
     switch(k){
       case "start": case "end": return fmtD(t[k]);
       case "duration": return `${t.duration}d`;
       case "percentComplete": return `${t.percentComplete||0}%`;
       case "predecessors": return (t.predecessors||[]).map(p=>p.id||p).join(", ");
       case "health":{const h=HC[t.health]||{l:t.health,c:"#94a3b8"};return `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${h.c};flex-shrink:0;display:inline-block"></span>${escapeHtml(h.l)}</span>`;}
-      case "name":{const dep=getDepth(tasks,t.id);const ind=dep*14;const fw=dep===0?700:dep===1?600:400;const fs=dep===0?10.5:dep===1?10:9.5;return `<span style="padding-left:${ind}px;font-weight:${fw};font-size:${fs}px">${escapeHtml(t.name)}</span>`;}
+      case "name":{const dep=getDepth(tasks,t.id);const ind=dep*14;const fw=dep===0?700:dep===1?600:400;const fs=dep===0?10.5:dep===1?10:9.5;const isP=tasks.some(x=>x.parentId===t.id);const key=projId+":"+t.id;const col=collapsedSet.has(key);const tri=(forPreview&&isP)?`<span class="pl-tri${col?"":" open"}" data-collapse="${key}" title="${col?"Expand":"Collapse"}">${col?"\u25B8":"\u25BE"}</span>`:"";return `<span class="pl-name" style="padding-left:${ind}px;font-weight:${fw};font-size:${fs}px">${tri}${escapeHtml(t.name)}</span>`;}
       default: return escapeHtml(t[k]);
     }
   };
@@ -8041,12 +8049,12 @@ function buildPDFHtml(cfg, data, forPreview) {
   if(cfg.includeGantt) {
     // Side-by-side: grid on left, Gantt timeline on right — like MS Project / Excel split view
     selProjs.forEach(proj=>{
-      let tasks=[...proj.tasks];
+      let tasks=visibleTasks(proj);
       if(cfg.healthFilter==="active") tasks=tasks.filter(t=>t.health==="yellow"||t.health==="red");
       if(cfg.healthFilter==="complete") tasks=tasks.filter(t=>t.health==="green");
       const thCols=colDefs.map(c=>`<th${c.w?` style="width:${c.w}px"`:""}>${COL_LABELS[c.k]}</th>`).join("");
       const rows=tasks.map((t,i)=>{
-        const cells=colDefs.map(c=>`<td class="c-${c.k}">${cellVal(t,c.k,proj.tasks)}</td>`).join("");
+        const cells=colDefs.map(c=>`<td class="c-${c.k}">${cellVal(t,c.k,proj.tasks,proj.id)}</td>`).join("");
         return `<tr class="${i%2?"alt":""}">${cells}</tr>`;
       }).join("");
       // Filter the project for Gantt to match the table's task list
@@ -8068,12 +8076,12 @@ function buildPDFHtml(cfg, data, forPreview) {
   } else {
     // Tables only (no Gantt) — full width
     selProjs.forEach(proj=>{
-      let tasks=[...proj.tasks];
+      let tasks=visibleTasks(proj);
       if(cfg.healthFilter==="active") tasks=tasks.filter(t=>t.health==="yellow"||t.health==="red");
       if(cfg.healthFilter==="complete") tasks=tasks.filter(t=>t.health==="green");
       const thCols=colDefs.map(c=>`<th${c.w?` style="width:${c.w}px"`:""}>${COL_LABELS[c.k]}</th>`).join("");
       const rows=tasks.map((t,i)=>{
-        const cells=colDefs.map(c=>`<td class="c-${c.k}">${cellVal(t,c.k,proj.tasks)}</td>`).join("");
+        const cells=colDefs.map(c=>`<td class="c-${c.k}">${cellVal(t,c.k,proj.tasks,proj.id)}</td>`).join("");
         return `<tr class="${i%2?"alt":""}">${cells}</tr>`;
       }).join("");
       bodyHtml+=`<div class="proj-block">${selProjs.length>1?`<div class="proj-name">${escapeHtml(proj.name)}</div>`:""}<table><thead><tr>${thCols}</tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -8118,6 +8126,10 @@ body{padding:${cfg.margins.top}in ${cfg.margins.right}in ${cfg.margins.bottom}in
 .split-table table.aligned tbody tr{height:18px}
 .split-table table.aligned tbody tr.alt{background:#f6f6f6}
 .split-table table.aligned tbody td{padding:0 6px;vertical-align:middle;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #ebebeb}
+.pl-tri{display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;font-size:8px;line-height:1;border-radius:3px;color:#64748b;background:#f1f3f5;border:1px solid #d4d8de;cursor:pointer;margin-right:3px;vertical-align:middle;user-select:none}
+.pl-tri.open{background:#e8f0fe;color:#4f46e5;border-color:#b6cef7}
+.pl-tri:hover{background:#eef0fe;color:#4f46e5;border-color:#c2c7f5}
+@media print{.pl-tri{display:none}}
 table{width:100%;border-collapse:collapse;font-size:9px}
 thead tr{background:#1a1a1a}
 thead th{padding:5px 6px;text-align:left;font-weight:700;font-size:8px;letter-spacing:.05em;text-transform:uppercase;color:#fff;white-space:nowrap}
@@ -8349,13 +8361,22 @@ ${bodyHtml}
   <span>Generated ${new Date().toLocaleString()}</span>
   <span>${escapeHtml(cfg.confidential||"")}</span>
   <span>planar</span>
-</div></body></html>`;
+</div>
+${forPreview?`<script>(function(){document.addEventListener("click",function(e){var el=e.target.closest&&e.target.closest("[data-collapse]");if(!el)return;e.preventDefault();e.stopPropagation();try{window.parent.postMessage({type:"planarToggleCollapse",key:el.getAttribute("data-collapse")},"*");}catch(_){}}, true);})();<\/script>`:""}
+</body></html>`;
 }
 
 // ── PDFExportModal ────────────────────────────────────────
 function PDFExportModal({data, activePid, onClose}) {
   const projs = Object.values(data.projects);
   const now = new Date();
+  const seedCollapsed = useMemo(() => {
+    const out = [];
+    Object.values(data.projects).forEach(p => p.tasks.forEach(t => {
+      if (p.tasks.some(x => x.parentId === t.id) && t.isExpanded === false) out.push(p.id + ":" + t.id);
+    }));
+    return out;
+  }, []);
   const [cfg, setCfg] = useState({
     exhibitLabel: "",
     projectTitle: "",
@@ -8371,8 +8392,12 @@ function PDFExportModal({data, activePid, onClose}) {
     showArrows: true,
     healthFilter: "all",
     confidential: "",
+    collapsedIds: seedCollapsed,
+    detailLevel: seedCollapsed.length ? "custom" : "all",
   });
   const upd = patch => setCfg(c => ({...c, ...patch}));
+  const cfgRef = useRef(cfg);
+  useEffect(() => { cfgRef.current = cfg; }, [cfg]);
   const [headerOpen, setHeaderOpen] = useState(false);
   // Collapsible sidebar sections — default open; clicking a section header toggles it
   const [secOpen, setSecOpen] = useState({});
@@ -8384,6 +8409,38 @@ function PDFExportModal({data, activePid, onClose}) {
     const t = setTimeout(() => setPreviewCfg(cfg), 280);
     return () => clearTimeout(t);
   }, [cfg]);
+
+  // ── Collapse / detail level (exhibit-only; never written back to live tasks) ──
+  // Collapse changes flush the preview immediately rather than waiting on the debounce.
+  const applyCollapse = (idsArr, lvl) => { const next = {...cfg, collapsedIds: idsArr, detailLevel: lvl}; setCfg(next); setPreviewCfg(next); };
+  const levelCollapsedIds = n => {
+    const out = [];
+    cfg.selProjects.forEach(pidStr => {
+      const p = data.projects[pidStr]; if (!p) return;
+      p.tasks.forEach(t => {
+        if (!p.tasks.some(x => x.parentId === t.id)) return;
+        let d = 0, cur = t; while (cur && cur.parentId != null) { d++; cur = p.tasks.find(x => x.id === cur.parentId); }
+        if (d >= (n - 1)) out.push(p.id + ":" + t.id);
+      });
+    });
+    return out;
+  };
+  const setDetailLevel = lvl => { if (lvl === "all") applyCollapse([], "all"); else applyCollapse(levelCollapsedIds(+lvl), String(lvl)); };
+  const expandAll = () => setDetailLevel("all");
+  const collapseAll = () => setDetailLevel("1");
+
+  // Collapse toggles fired from the ▾/▸ triangles inside the preview iframe.
+  useEffect(() => {
+    const onToggle = e => {
+      if (!e.data || e.data.type !== "planarToggleCollapse") return;
+      const key = e.data.key, c = cfgRef.current, s = new Set(c.collapsedIds || []);
+      if (s.has(key)) s.delete(key); else s.add(key);
+      const next = {...c, collapsedIds: [...s], detailLevel: "custom"};
+      setCfg(next); setPreviewCfg(next);
+    };
+    window.addEventListener("message", onToggle);
+    return () => window.removeEventListener("message", onToggle);
+  }, []);
 
   // Blob URL for iframe preview
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -8564,6 +8621,16 @@ function PDFExportModal({data, activePid, onClose}) {
             <Row label="Tasks">
               <SegBtn small options={[{l:"All",v:"all"},{l:"Active",v:"active"},{l:"Done",v:"complete"}]} value={cfg.healthFilter} onChange={v=>upd({healthFilter:v})} />
             </Row>
+            <Row label={<span style={{display:"inline-flex",alignItems:"center",gap:5}}>Detail{cfg.detailLevel==="custom" && <span style={{fontSize:8,fontWeight:700,color:"#4f46e5",background:"#eef0fe",padding:"1px 5px",borderRadius:99,letterSpacing:".03em"}}>CUSTOM</span>}</span>}>
+              <SegBtn small options={[{l:"All",v:"all"},{l:"L1",v:"1"},{l:"1\u20132",v:"2"},{l:"1\u20133",v:"3"}]} value={cfg.detailLevel} onChange={setDetailLevel} />
+            </Row>
+            <div style={{display:"flex",gap:6,padding:"3px 0 1px"}}>
+              {[["Expand all",expandAll],["Collapse all",collapseAll]].map(([lbl,fn])=>(
+                <span key={lbl} onClick={fn} style={{flex:1,textAlign:"center",padding:"3px 0",fontSize:10,cursor:"pointer",borderRadius:4,border:"1px solid var(--bd2)",color:"var(--mut)",userSelect:"none",transition:"background .12s"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="var(--surf)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>{lbl}</span>
+              ))}
+            </div>
+            <div style={{fontSize:9.5,color:"var(--mut)",lineHeight:1.45,padding:"3px 0 1px"}}>Tip: click \u25BE on a row in the preview to open or collapse that branch. This only affects the exhibit \u2014 your live schedule stays as-is.</div>
             <Row label="Gantt"><Toggle on={cfg.includeGantt} onChange={v=>upd({includeGantt:v})} /></Row>
             {cfg.includeGantt && (
               <Row label="Today line"><Toggle on={cfg.showToday!==false} onChange={v=>upd({showToday:v})} /></Row>
