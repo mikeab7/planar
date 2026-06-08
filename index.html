@@ -3450,7 +3450,13 @@ function App() {
             const successors = p.tasks.filter(t =>
               normPreds(t.predecessors).some(pr => pr.id === taskId) && t.health !== 'green'
             );
-            if (successors.length > 0) {
+            // Only prompt when the completion actually unblocks something — i.e. there's at
+            // least one Not Started (gray) successor to advance. Successors that are already
+            // In Progress or Needs Attention need no review, so completing a task whose
+            // successors are all already active opens nothing (the celebration still fires).
+            // Already-active successors still ride along as context when the prompt does open.
+            const hasReadyToStart = successors.some(t => t.health === 'gray');
+            if (hasReadyToStart) {
               setSuccessorPrompt({ completedTask, projId: pid2, projName: p.name, successors });
             }
           }, 80);
@@ -3633,6 +3639,22 @@ function App() {
     setGoToFocus({taskId, n: Date.now()}); // fresh token each jump, even to the same row
   }, []);
 
+  // Reveal a freshly-inserted row Excel-style: select it (no edit field — typing a letter
+  // begins editing, exactly like a spreadsheet) and let the existing select→scroll effect
+  // bring it into view. Each insert expands & un-spotlights the new row's ancestors inside
+  // its (pure) data update so the row can never land hidden; revealRef carries the
+  // post-renumber id out, and rAF applies the selection after the commit.
+  const revealRef = useRef(null);
+  const revealInserted = useCallback(() => {
+    requestAnimationFrame(() => {
+      const id = revealRef.current; revealRef.current = null;
+      if (id == null) return;
+      setSelectedId(id); setSelRange(null);
+      const ni = COLS.findIndex(c => c.k === "name");
+      if (ni >= 0) setSelectedColIdx(ni);
+    });
+  }, []);
+
   const addTask = useCallback(() => {
     setData(d => {
       const pid = d.aPid;
@@ -3647,9 +3669,15 @@ function App() {
       const lastTask = visualOrder.length > 0 ? visualOrder[visualOrder.length - 1] : null;
       const newParentId = lastTask ? lastTask.parentId : null;
       const task = mkt(id, "", "", "", newParentId);
-      const tasks = [...d.projects[pid].tasks, task];
-      return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(tasks))}}};
+      let tasks = [...d.projects[pid].tasks, task];
+      // expand & un-spotlight ancestors so the new row can't be hidden
+      const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      const finalArr = sortByVisualOrder(tasks);
+      revealRef.current = finalArr.indexOf(task) + 1;
+      return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(finalArr)}}};
     });
+    revealInserted();
   }, []);
 
   const deleteTask = useCallback((taskId) => {
@@ -3706,7 +3734,7 @@ function App() {
       const newTask = mkt(0, "", "", "", newParentId);
 
       // Insert in raw array directly before the selected task (visual position handled by sort)
-      const tasks = [...rawTasks];
+      let tasks = [...rawTasks];
       if (selectedId === null) {
         tasks.push(newTask);
       } else {
@@ -3715,8 +3743,14 @@ function App() {
         else tasks.splice(rawIdx, 0, newTask);
       }
 
-      return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(sortByVisualOrder(tasks)) } } };
+      // expand & un-spotlight ancestors so the new row can't be hidden
+      const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      const finalArr = sortByVisualOrder(tasks);
+      revealRef.current = finalArr.indexOf(newTask) + 1;
+      return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(finalArr) } } };
     });
+    revealInserted();
   }, [selectedId]);
 
   // Alt+Shift+Right — indent exactly one level (child of nearest preceding task at same level)
@@ -3813,11 +3847,15 @@ function App() {
       const newParentId = targetTask ? targetTask.parentId : null;
       // New tasks start blank (see insertTask)
       const newTask = mkt(0, "", "", "", newParentId);
-      const tasks = [...rawTasks];
+      let tasks = [...rawTasks];
       if (!targetTask) { tasks.push(newTask); }
       else { const rawIdx = tasks.findIndex(t => t.id === targetTask.id); tasks.splice(rawIdx + 1, 0, newTask); }
+      const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      revealRef.current = tasks.indexOf(newTask) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(tasks) } } };
     });
+    revealInserted();
   }, []);
 
   // insertTaskAbove: takes taskId directly to avoid stale-closure bug in context menu
@@ -3850,12 +3888,16 @@ function App() {
 
       // New tasks start blank (see insertTask)
       const newTask = mkt(0, "", "", "", newParentId);
-      const tasks = [...rawTasks];
+      let tasks = [...rawTasks];
       const rawIdx = tasks.findIndex(t => t.id === taskId);
       if (rawIdx === -1) tasks.push(newTask);
       else tasks.splice(rawIdx, 0, newTask);
+      const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      revealRef.current = tasks.indexOf(newTask) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(tasks) } } };
     });
+    revealInserted();
   }, []);
 
   const addSubtask = useCallback((taskId) => {
@@ -3867,9 +3909,13 @@ function App() {
       // New tasks start blank (see insertTask)
       const task = mkt(id, "", "", "", taskId);
       let tasks = [...d.projects[pid].tasks, task];
-      tasks = tasks.map(t => t.id === taskId ? {...t, isExpanded: true} : t);
+      // expand & un-spotlight the parent and every ancestor so the new child can't be hidden
+      const anc = new Set([taskId]); { let p = taskId; while (p != null) { const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; if (p != null) anc.add(p); } }
+      tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      revealRef.current = id;
       return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks}}};
     });
+    revealInserted();
   }, []);
 
   const duplicateTask = useCallback((taskId) => {
@@ -3882,10 +3928,14 @@ function App() {
       const nid = Math.max(d.nTid[pid] ?? 1, Math.max(0, ...tasks.map(t=>t.id)) + 1);
       const copy = {...src, id: nid, name: src.name + " (Copy)", notes: src.notes.map(n => ({...n}))};
       const srcIdx = tasks.findIndex(t => t.id === taskId);
-      const newTasks = [...tasks];
+      let newTasks = [...tasks];
       newTasks.splice(srcIdx + 1, 0, copy);
+      const anc = new Set(); { let p = copy.parentId; while (p != null) { anc.add(p); const par = newTasks.find(t => t.id === p); p = par ? par.parentId : null; } }
+      if (anc.size) newTasks = newTasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      revealRef.current = newTasks.indexOf(copy) + 1;
       return {...d, nTid: {...d.nTid, [pid]: nid+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(newTasks)}}};
     });
+    revealInserted();
   }, []);
 
   // ─── Task clipboard (Ctrl+C / Ctrl+X / Ctrl+V) ──────────────────────────────
