@@ -383,6 +383,10 @@ const rebuildHEALTH = (custom = [], labelOverrides = {}) => {
   });
 };
 const fd = d => d.toISOString().slice(0,10);
+// Local calendar date (YYYY-MM-DD). Unlike fd()'s UTC slice, this never rolls a day
+// early/late for the user's timezone — used for every "today" comparison (overdue,
+// due-soon, the today line).
+const fdLocal = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
 // ── XSS sanitization ─────────────────────────────────────
 // escapeHtml: use whenever user data is interpolated into HTML/SVG string templates.
@@ -656,7 +660,7 @@ const rollupParentDates = tasks => {
   return tasks.map(t => map[t.id]);
 };
 
-const NOW  = fd(new Date());
+let NOW = fdLocal(new Date()); // local "today"; refreshed live by App (focus / midnight rollover)
 
 // Compute display health from conditional formatting rules
 const computeDisplayHealth = (task, settings) => {
@@ -713,7 +717,7 @@ const mkt = (id, name, start, dur, parentId=null, health="gray", predecessors=[]
   return {
     id, name, start: safeStart, end: calcEnd(safeStart, safeDur), duration: safeDur, predecessors, health,
     percentComplete: health==="green" ? 100 : health==="yellow" ? 40 : 0,
-    parentId, responsibleParty: "", notes: [], isExpanded: true,
+    parentId, responsibleParty: "", cost: "", notes: [], isExpanded: true,
   };
 };
 
@@ -965,6 +969,7 @@ const COLS = [
   {k:"health",          l:"●",       w:36,  e:true, t:"health"},
   {k:"status",          l:"Status",  w:84,  e:false           },
   {k:"responsibleParty",l:"Owner",   w:132, e:true            },
+  {k:"cost",            l:"Cost",    w:88,  e:true, t:"cost"  },
   {k:"notes",           l:"Notes",   w:192, e:true, t:"notes" },
 ];
 const TOTAL_W = COLS.reduce((s,c) => s+c.w, 0);
@@ -2787,6 +2792,18 @@ function App() {
   const [selectedId,    setSelectedId]    = useState(null);
   const [selRange,      setSelRange]      = useState(null); // {r1,r2,c1,c2} — row/col indices into flatTasks/COLS
   const [selectedColIdx, setSelectedColIdx] = useState(0);
+  // Keep "today" current within a live session so overdue/due-soon colors and the today line
+  // re-evaluate on tab focus and roll over at midnight — no reload needed. NOW is module-scope
+  // (read by computeDisplayHealth); bumping todayTick forces the re-render that re-reads it.
+  const [, setTodayTick] = useState(0);
+  useEffect(() => {
+    const refresh = () => { const t = fdLocal(new Date()); if (t !== NOW) { NOW = t; setTodayTick(x => x + 1); } };
+    const onVis = () => { if (!document.hidden) refresh(); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVis);
+    const iv = setInterval(refresh, 60000);
+    return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
+  }, []);
   const [goToFocus,      setGoToFocus]      = useState(null); // {taskId, n} — grid scrolls to + pulses this row after a cross-view jump
   const [offlineFallback, setOfflineFallback] = useState(false);
   const [staleNotice, setStaleNotice] = useState(false);
@@ -3140,7 +3157,7 @@ function App() {
           const col = COLS[selectedColIdx];
           if (col?.e && col.t !== "health" && col.t !== "notes") {
             const selTask = flatTasksRef.current.find(t => t.id === selectedId);
-            const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration");
+            const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration"||col.k==="cost");
             if (!isParentDateLocked) {
               const blank = (col.k === "duration" || col.k === "percentComplete") ? 0 : "";
               updateTask(selectedId, {[col.k]: blank});
@@ -3263,7 +3280,7 @@ function App() {
             trigger?.click();
           } else if (col.e) {
               const selTask = flatTasksRef.current.find(t => t.id === selectedId);
-              const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration");
+              const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration"||col.k==="cost");
               if (!isParentDateLocked) setEdit({taskId: selectedId, col: col.k});
           }
           return;
@@ -3280,7 +3297,7 @@ function App() {
           }
           if (col.e && col.t !== "health") {
             const selTask = flatTasksRef.current.find(t => t.id === selectedId);
-            const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration");
+            const isParentDateLocked = selTask?.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration"||col.k==="cost");
             if (isParentDateLocked) return;
             // Fix #3: numeric columns reject non-digit type-to-edit (matches Grid view behaviour)
             const isNum = col.k === "duration" || col.k === "percentComplete";
@@ -3672,7 +3689,7 @@ function App() {
       let tasks = [...d.projects[pid].tasks, task];
       // expand & un-spotlight ancestors so the new row can't be hidden
       const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
-      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: t.id === newParentId ? false : t.focused} : t);
       const finalArr = sortByVisualOrder(tasks);
       revealRef.current = finalArr.indexOf(task) + 1;
       return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(finalArr)}}};
@@ -3745,7 +3762,7 @@ function App() {
 
       // expand & un-spotlight ancestors so the new row can't be hidden
       const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
-      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: t.id === newParentId ? false : t.focused} : t);
       const finalArr = sortByVisualOrder(tasks);
       revealRef.current = finalArr.indexOf(newTask) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(finalArr) } } };
@@ -3851,7 +3868,7 @@ function App() {
       if (!targetTask) { tasks.push(newTask); }
       else { const rawIdx = tasks.findIndex(t => t.id === targetTask.id); tasks.splice(rawIdx + 1, 0, newTask); }
       const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
-      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: t.id === newParentId ? false : t.focused} : t);
       revealRef.current = tasks.indexOf(newTask) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(tasks) } } };
     });
@@ -3893,7 +3910,7 @@ function App() {
       if (rawIdx === -1) tasks.push(newTask);
       else tasks.splice(rawIdx, 0, newTask);
       const anc = new Set(); { let p = newParentId; while (p != null) { anc.add(p); const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; } }
-      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      if (anc.size) tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: t.id === newParentId ? false : t.focused} : t);
       revealRef.current = tasks.indexOf(newTask) + 1;
       return { ...d, projects: { ...d.projects, [pid]: { ...d.projects[pid], tasks: renumberTasks(tasks) } } };
     });
@@ -3911,7 +3928,7 @@ function App() {
       let tasks = [...d.projects[pid].tasks, task];
       // expand & un-spotlight the parent and every ancestor so the new child can't be hidden
       const anc = new Set([taskId]); { let p = taskId; while (p != null) { const par = tasks.find(t => t.id === p); p = par ? par.parentId : null; if (p != null) anc.add(p); } }
-      tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      tasks = tasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: t.id === taskId ? false : t.focused} : t);
       revealRef.current = id;
       return {...d, nTid: {...d.nTid, [pid]: id+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks}}};
     });
@@ -3931,7 +3948,7 @@ function App() {
       let newTasks = [...tasks];
       newTasks.splice(srcIdx + 1, 0, copy);
       const anc = new Set(); { let p = copy.parentId; while (p != null) { anc.add(p); const par = newTasks.find(t => t.id === p); p = par ? par.parentId : null; } }
-      if (anc.size) newTasks = newTasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: false} : t);
+      if (anc.size) newTasks = newTasks.map(t => anc.has(t.id) ? {...t, isExpanded: true, focused: t.id === copy.parentId ? false : t.focused} : t);
       revealRef.current = newTasks.indexOf(copy) + 1;
       return {...d, nTid: {...d.nTid, [pid]: nid+1}, projects: {...d.projects, [pid]: {...d.projects[pid], tasks: renumberTasks(newTasks)}}};
     });
@@ -4195,6 +4212,16 @@ function App() {
     // done, not-started, or paused. Anything with in-progress/needs-attention work stays.
     const hideStatusOf = id => { const s = rolledStatus(id); return s === "active" ? null : s; };
 
+    // Cost roll-up: a parent's cost is the sum of its descendant leaf costs (read-only,
+    // like dates); a leaf shows its own entered value. Computed for display only.
+    const costMemo = {};
+    const costOf = id => {
+      if (id in costMemo) return costMemo[id];
+      const kids = kidsOf(id);
+      const v = kids.length ? kids.reduce((s, c) => s + costOf(c.id), 0) : (Number(byId[id]?.cost) || 0);
+      costMemo[id] = v; return v;
+    };
+
     const out = [];
     const walk = (parentId, level) => {
       const parent = parentId === null ? null : byId[parentId];
@@ -4213,7 +4240,7 @@ function App() {
           });
         }
         out.push({...t, level, hasChildren, hideableDone, hideableUpcoming, hideablePaused,
-          hideableCount: hideableDone + hideableUpcoming + hideablePaused});
+          hideableCount: hideableDone + hideableUpcoming + hideablePaused, rolledCost: costOf(t.id)});
         if (t.isExpanded) walk(t.id, level + 1);
       });
     };
@@ -5569,6 +5596,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
       updateTask(id, {predecessors: preds});
     }
     else if (col==="health"||col==="status") updateTask(id,{health:val});
+    else if (col==="cost") { const n=String(val).replace(/[^0-9.]/g,""); updateTask(id,{cost: n==="" ? "" : (parseFloat(n)||0)}); }
     else updateTask(id,{[col]:val});
   };
 
@@ -5885,7 +5913,7 @@ function GridView({tasks, succMap, updateTask, deleteTask, getTaskName, proj, se
                     }}
                     onDoubleClick={() => {
                       if (review) return;
-                      const isParentDateLocked = task.hasChildren && (c.k==="start"||c.k==="end"||c.k==="duration");
+                      const isParentDateLocked = task.hasChildren && (c.k==="start"||c.k==="end"||c.k==="duration"||c.k==="cost");
                       // Picker columns (health/status) have their own popover — text-edit on them
                       // would render the raw value (e.g. "yellow") in an input, which is meaningless
                       // to the user. Notes also handled separately via the notes modal.
@@ -6207,7 +6235,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
 
   if (isEdit) {
     // Parent tasks: start/end/duration are computed from children — never editable
-    const isParentDateLocked = task.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration");
+    const isParentDateLocked = task.hasChildren && (col.k==="start"||col.k==="end"||col.k==="duration"||col.k==="cost");
     if (!isParentDateLocked) {
       // Date columns: plain text input accepting "5/7", "5/7/26", "5/7/2026"
       if (col.t==="date") {
@@ -6303,6 +6331,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
         {proj?.tasks.some(t=>t.parentId===task.id) ? (
           <span
             onClick={e=>{e.stopPropagation();updateTask(task.id,{isExpanded:!task.isExpanded});}}
+            onDoubleClick={e=>e.stopPropagation()}
             title={task.isExpanded?"Collapse":"Expand"}
             style={{
               cursor:"pointer",flexShrink:0,
@@ -6332,6 +6361,7 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
         {task.hasChildren && task.isExpanded && task.hideableCount > 0 && (
           <span
             onClick={e=>{ e.stopPropagation(); updateTask(task.id, {focused: !task.focused}); }}
+            onDoubleClick={e=>e.stopPropagation()}
             title={task.focused
               ? `Show all tasks in this group — ${task.hideableDone} completed, ${task.hideablePaused} paused, ${task.hideableUpcoming} not started hidden`
               : `Focus: hide ${task.hideableCount} completed / paused / not-started task${task.hideableCount>1?'s':''}`}
@@ -6442,6 +6472,15 @@ function Cell({task, col, edit, setEdit, commit, commitAndAdvance, proj, succMap
     case "responsibleParty":
       // Match the neighboring data cells (dates, duration, notes): muted, 11px
       return <span style={{...s,color:"var(--mut)",fontSize:11}}>{task.responsibleParty||""}</span>;
+    case "cost": {
+      const v = task.rolledCost ?? (Number(task.cost) || 0);
+      const rolled = task.hasChildren;
+      const st = {...s, ...mono, fontSize:11, justifyContent:"flex-end", color: rolled ? "#94a3b8" : "var(--mut)"};
+      if (!v) return <span style={st} title={rolled?"Sum of subtask costs":undefined} />;
+      return <span style={st} title={rolled?"Sum of subtask costs":undefined}>
+        {"$" + Number(v).toLocaleString("en-US", {maximumFractionDigits:2})}
+      </span>;
+    }
     case "notes": {
       const count = task.notes.length;
       const latest = task.notes[task.notes.length - 1];
@@ -6709,6 +6748,9 @@ function GanttView({tasks, updateTask, pxPerDay, onZoomChange, scrollRef, onScro
             const h = HEALTH[displayHealth] || HEALTH["gray"];
             const rowBg = task.rowColor || (isExpandedParent ? (ri%2?"#f8fafc":"var(--bg)") : (displayHealth==="red"?"#ffdfdf":displayHealth==="yellow"?"#fff7b9":displayHealth==="green"?"#d6fae2":displayHealth==="paused"?"#f3f4f6":ri%2?"#f8fafc":"var(--bg)"));
             const isGanttSel = selectedId === task.id;
+            // Leaf bars: slim enough to sit just under the deepest parent bracket (monotonic
+            // by depth), bottom-aligned with the brackets so baselines line up across the chart.
+            const LEAF_H = ROW_H*0.25;
 
             // Blank-date task: render just the row, no bar/diamond
             if (isBlankDates) {
@@ -6737,12 +6779,26 @@ function GanttView({tasks, updateTask, pxPerDay, onZoomChange, scrollRef, onScro
                     </>); })()}
                 </>) : isSummary ? (<>
                   {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; const ctr=settings?.barLabels?.nameAlign==="center"; return <span style={{position:"absolute",left:ctr?bx+bw/2:bx,transform:ctr?"translateX(-50%)":"none",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
-                  <div style={{position:"absolute",left:bx,width:bw,top:ROW_H-10,height:9,zIndex:5}}>
-                    <div style={{position:"absolute",left:0,right:0,top:0,height:5,background:task.rowColor||h.ganttBar,border:task.rowColor?"1px solid rgba(0,0,0,0.2)":"none",boxSizing:"border-box"}} />
-                    <div style={{position:"absolute",left:0,top:0,height:5,width:`${Math.min(100,progressMap[task.id]||0)}%`,background:"rgba(0,0,0,0.22)"}} />
-                    <div style={{position:"absolute",left:0,top:5,width:0,height:0,borderTop:`5px solid ${task.rowColor||h.ganttBar}`,borderRight:"5px solid transparent"}} />
-                    <div style={{position:"absolute",right:0,top:5,width:0,height:0,borderTop:`5px solid ${task.rowColor||h.ganttBar}`,borderLeft:"5px solid transparent"}} />
-                  </div>
+                  {(() => {
+                    // Graduated roll-up bracket: slab weight, cap size and graphite shade all
+                    // step down by depth, so a top section reads heavier than a sub-sub-group
+                    // and leaves never out-weigh their parent. Structure stays neutral graphite
+                    // so status colors are reserved for actual task bars. rowColor override wins.
+                    const d = Math.min(task.level||0, 3);
+                    const SLAB = [0.31,0.27,0.23,0.195][d]*ROW_H;
+                    const CAP  = [0.14,0.12,0.10,0.085][d]*ROW_H;
+                    const col  = task.rowColor || ["#1f2937","#3f4a5a","#5b6878","#7d8a9a"][d];
+                    const capW = Math.max(4, CAP*1.1);
+                    const top  = ROW_H - (SLAB+CAP) - 1;
+                    return (
+                    <div style={{position:"absolute",left:bx,width:bw,top,height:SLAB+CAP,zIndex:5}}>
+                      <div style={{position:"absolute",left:0,right:0,top:0,height:SLAB,background:col,border:task.rowColor?"1px solid rgba(0,0,0,0.2)":"none",boxSizing:"border-box",borderRadius:1}} />
+                      <div style={{position:"absolute",left:0,top:0,height:SLAB,width:`${Math.min(100,progressMap[task.id]||0)}%`,background:"rgba(0,0,0,0.18)"}} />
+                      <div style={{position:"absolute",left:0,top:SLAB,width:0,height:0,borderTop:`${CAP}px solid ${col}`,borderRight:`${capW}px solid transparent`}} />
+                      <div style={{position:"absolute",right:0,top:SLAB,width:0,height:0,borderTop:`${CAP}px solid ${col}`,borderLeft:`${capW}px solid transparent`}} />
+                    </div>
+                    );
+                  })()}
                 </>) : (<>
                   {(() => { const lg=[{fontSize:10,fontWeight:600},{fontSize:9,fontWeight:500},{fontSize:9,fontWeight:400},{fontSize:8.5,fontWeight:400}][Math.min(task.level||0,3)]; const ctr=settings?.barLabels?.nameAlign==="center"; return <span style={{position:"absolute",left:ctr?bx+bw/2:bx,transform:ctr?"translateX(-50%)":"none",top:1,fontSize:lg.fontSize,color:"#374151",fontFamily:"'Inter',system-ui,sans-serif",whiteSpace:"nowrap",pointerEvents:"none",fontWeight:task.bold?700:lg.fontWeight,fontStyle:task.italic?"italic":"normal",zIndex:7,lineHeight:1.2}}>{task.name}</span>; })()}
                   {(() => { const bl=settings?.barLabels; if(!bl) return null;
@@ -6755,16 +6811,16 @@ function GanttView({tasks, updateTask, pxPerDay, onZoomChange, scrollRef, onScro
                       explicit per-task fillColor override switches to a solid bar so the user's choice
                       isn't visually competing with status hatching. */}
                   {task.rowColor ? (
-                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,background:task.rowColor,border:"1px solid rgba(0,0,0,0.2)",boxSizing:"border-box",zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
+                    <div style={{position:"absolute",left:bx,top:ROW_H-LEAF_H-1,height:LEAF_H,width:bw,background:task.rowColor,border:"1px solid rgba(0,0,0,0.2)",boxSizing:"border-box",zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
                       <div style={{width:`${task.percentComplete}%`,background:"rgba(0,0,0,0.18)",flexShrink:0}} />
                     </div>
                   ) : h.ganttStyle === "outline" ? (
-                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,background:"transparent",border:"1.5px dashed #94a3b8",borderRadius:1,zIndex:5}} />
+                    <div style={{position:"absolute",left:bx,top:ROW_H-LEAF_H-1,height:LEAF_H,width:bw,background:"transparent",border:"1.5px dashed #94a3b8",borderRadius:1,zIndex:5}} />
                   ) : h.ganttStyle === "stripe" ? (
-                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,zIndex:5,overflow:"hidden",borderRadius:1,
+                    <div style={{position:"absolute",left:bx,top:ROW_H-LEAF_H-1,height:LEAF_H,width:bw,zIndex:5,overflow:"hidden",borderRadius:1,
                       background:`repeating-linear-gradient(45deg,#9ca3af 0px,#9ca3af 2px,#d1d5db 2px,#d1d5db 6px)`}} />
                   ) : (
-                    <div style={{position:"absolute",left:bx,top:ROW_H-11,height:7,width:bw,background:h.ganttBar,zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
+                    <div style={{position:"absolute",left:bx,top:ROW_H-LEAF_H-1,height:LEAF_H,width:bw,background:h.ganttBar,zIndex:5,overflow:"hidden",display:"flex",alignItems:"stretch",borderRadius:1}}>
                       <div style={{width:`${task.percentComplete}%`,background:"rgba(0,0,0,0.18)",flexShrink:0}} />
                     </div>
                   )}
@@ -7994,13 +8050,25 @@ function buildGanttSVG(projects, svgWidth, orientation, opts = {}) {
       if(L) blText+=`<text x="${lx}" y="${y+ROW_H*0.68}" font-size="6.5" fill="#555" text-anchor="end" font-family="Arial,sans-serif">${escapeHtml(L)}</text>`;
       if(R) blText+=`<text x="${rx}" y="${y+ROW_H*0.68}" font-size="6.5" fill="#555" font-family="Arial,sans-serif">${escapeHtml(R)}</text>`;
     }
+    let barSvg;
+    if(isMilestone){
+      barSvg=`<polygon points="${bx},${midY-5} ${bx+5},${midY} ${bx},${midY+5} ${bx-5},${midY}" fill="${color}"/>`;
+    }else if(isParent){
+      // Graduated roll-up bracket (matches on-screen Gantt): graphite, weight + cap step down by depth.
+      const dd=Math.min(depth,3);
+      const SLAB=[0.31,0.27,0.23,0.195][dd]*ROW_H, CAP=[0.14,0.12,0.10,0.085][dd]*ROW_H, capW=Math.max(3,CAP*1.1);
+      const GRA=["#1f2937","#3f4a5a","#5b6878","#7d8a9a"][dd];
+      const sTop=midY-(SLAB+CAP)/2, sBot=sTop+SLAB;
+      barSvg=`<rect x="${bx}" y="${sTop}" width="${bw}" height="${SLAB}" rx="1" fill="${GRA}"/>`
+        +`<polygon points="${bx},${sBot} ${bx+capW},${sBot} ${bx},${sBot+CAP}" fill="${GRA}"/>`
+        +`<polygon points="${bx+bw},${sBot} ${bx+bw-capW},${sBot} ${bx+bw},${sBot+CAP}" fill="${GRA}"/>`;
+    }else{
+      const LH=ROW_H*0.25;
+      barSvg=`<rect x="${bx}" y="${midY-LH/2}" width="${bw}" height="${LH}" rx="2" fill="${color}" opacity="0.9"/>`;
+    }
     return `<rect x="0" y="${y}" width="${svgWidth}" height="${ROW_H}" fill="${bg}"/>
 ${labelHtml}
-${isMilestone?`<polygon points="${bx},${midY-5} ${bx+5},${midY} ${bx},${midY+5} ${bx-5},${midY}" fill="${color}"/>`
-:isParent?`<rect x="${bx}" y="${barY}" width="${bw}" height="${barH*0.55}" fill="${color}" opacity="0.9"/>
-<polygon points="${bx},${barY+barH*0.55} ${bx+5},${barY+barH}" fill="${color}" opacity="0.9"/>
-<polygon points="${bx+bw},${barY+barH*0.55} ${bx+bw-5},${barY+barH}" fill="${color}" opacity="0.9"/>`
-:`<rect x="${bx}" y="${barY}" width="${bw}" height="${barH}" rx="2" fill="${color}" opacity="0.85"/>`}${blText}`;
+${barSvg}${blText}`;
   }).join("");
   // Dependency connectors — same curved style as the in-app Gantt (cubic bezier,
   // direction-flipped 32px handles, type colors, dashed). Opacity lifted .55 -> .7 for print.
@@ -8037,7 +8105,7 @@ ${isMilestone?`<polygon points="${bx},${midY-5} ${bx+5},${midY} ${bx},${midY+5} 
     +visibleMonths.map(m=>`<text x="${m.x+3}" y="15" font-size="7.5" fill="#e8e8e8" font-family="Arial,sans-serif">${m.label}</text>`).join("")
     +(monthPx<26?yearMarkers.map(m=>`<line x1="${m.x}" y1="0" x2="${m.x}" y2="${HEADER_H}" stroke="#999" stroke-width="1"/>`).join(""):"");
   // Today marker — red dashed line with a tick in the header band
-  const todayStr=fd(new Date());
+  const todayStr=fdLocal(new Date());
   const todayLine=(opts.showToday!==false && todayStr>=minD&&todayStr<=maxD)
     ? `<line x1="${xOf(todayStr)}" y1="${HEADER_H}" x2="${xOf(todayStr)}" y2="${svgH}" stroke="#dc2626" stroke-width="1" stroke-dasharray="3,2"/>
 <polygon points="${xOf(todayStr)-3.5},${HEADER_H-6} ${xOf(todayStr)+3.5},${HEADER_H-6} ${xOf(todayStr)},${HEADER_H}" fill="#dc2626"/>`
@@ -8056,9 +8124,9 @@ function buildPDFHtml(cfg, data, forPreview) {
   const COL_DEFS = [
     {k:"id",w:20},{k:"name",w:null},{k:"start",w:42},{k:"end",w:42},
     {k:"duration",w:28},{k:"health",w:72},{k:"percentComplete",w:36},
-    {k:"responsibleParty",w:64},{k:"predecessors",w:36},
+    {k:"responsibleParty",w:64},{k:"predecessors",w:36},{k:"cost",w:56},
   ];
-  const COL_LABELS = {id:"ID",name:"Task Name",start:"Start",end:"End",duration:"Dur",health:"Status",percentComplete:"%",responsibleParty:"Owner",predecessors:"Pred"};
+  const COL_LABELS = {id:"ID",name:"Task Name",start:"Start",end:"End",duration:"Dur",health:"Status",percentComplete:"%",responsibleParty:"Owner",predecessors:"Pred",cost:"Cost"};
   const colDefs = COL_DEFS.filter(c => cfg.columns.includes(c.k));
   const HC = {gray:{l:"Not Started",c:"#94a3b8"},yellow:{l:"In Progress",c:"#d97706"},red:{l:"Needs Attn.",c:"#dc2626"},green:{l:"Complete",c:"#16a34a"},paused:{l:"Paused",c:"#9ca3af"}};
   const fmtD = s => { if(!s) return ""; const [y,m,d]=s.split("-"); return String(+m).padStart(2,'0')+'/'+String(+d).padStart(2,'0')+'/'+y.slice(2); };
@@ -8071,14 +8139,16 @@ function buildPDFHtml(cfg, data, forPreview) {
     while (pid != null) { if (collapsedSet.has(proj.id + ":" + pid)) return false; const par = proj.tasks.find(x => x.id === pid); pid = par ? par.parentId : null; }
     return true;
   });
-  const cellVal = (t,k,tasks,projId) => {
-    switch(k){
+  // Rolled cost for the exhibit: parent = sum of descendant leaf costs; leaf = own value.
+  const costOfIn = (tasks, id) => { const kids = tasks.filter(x=>x.parentId===id); return kids.length ? kids.reduce((s,c)=>s+costOfIn(tasks,c.id),0) : (Number(tasks.find(x=>x.id===id)?.cost)||0); };
+  const cellVal = (t,k,tasks,projId) => {    switch(k){
       case "start": case "end": return fmtD(t[k]);
       case "duration": return `${t.duration}d`;
       case "percentComplete": return `${t.percentComplete||0}%`;
       case "predecessors": return (t.predecessors||[]).map(p=>p.id||p).join(", ");
       case "health":{const h=HC[t.health]||{l:t.health,c:"#94a3b8"};return `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:${h.c};flex-shrink:0;display:inline-block"></span>${escapeHtml(h.l)}</span>`;}
       case "name":{const dep=getDepth(tasks,t.id);const ind=dep*14;const fw=dep===0?700:dep===1?600:400;const fs=dep===0?10.5:dep===1?10:9.5;const isP=tasks.some(x=>x.parentId===t.id);const key=projId+":"+t.id;const col=collapsedSet.has(key);const tri=(forPreview&&isP)?`<span class="pl-tri${col?"":" open"}" data-collapse="${key}" title="${col?"Expand":"Collapse"}">${col?"\u25B8":"\u25BE"}</span>`:"";return `<span class="pl-name" style="padding-left:${ind}px;font-weight:${fw};font-size:${fs}px">${tri}${escapeHtml(t.name)}</span>`;}
+      case "cost":{const v=costOfIn(tasks,t.id);return v?("$"+Number(v).toLocaleString("en-US",{maximumFractionDigits:2})):"";}
       default: return escapeHtml(t[k]);
     }
   };
@@ -8177,6 +8247,7 @@ body{padding:${cfg.margins.top}in ${cfg.margins.right}in ${cfg.margins.bottom}in
 .split-table table.aligned tbody tr.alt{background:#f6f6f6}
 .split-table table.aligned tbody td{padding:0 6px;vertical-align:middle;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #ebebeb}
 .pl-tri{display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;font-size:8px;line-height:1;border-radius:3px;color:#64748b;background:#f1f3f5;border:1px solid #d4d8de;cursor:pointer;margin-right:3px;vertical-align:middle;user-select:none}
+.c-cost{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .pl-tri.open{background:#e8f0fe;color:#4f46e5;border-color:#b6cef7}
 .pl-tri:hover{background:#eef0fe;color:#4f46e5;border-color:#c2c7f5}
 @media print{.pl-tri{display:none}}
@@ -8552,7 +8623,7 @@ function PDFExportModal({data, activePid, onClose}) {
     {k:"id",label:"ID"},{k:"name",label:"Task Name"},{k:"start",label:"Start"},
     {k:"end",label:"End"},{k:"duration",label:"Duration"},{k:"health",label:"Status"},
     {k:"percentComplete",label:"% Done"},{k:"responsibleParty",label:"Owner"},
-    {k:"predecessors",label:"Predecessors"},
+    {k:"predecessors",label:"Predecessors"},{k:"cost",label:"Cost"},
   ];
 
   const openPrint = () => {
